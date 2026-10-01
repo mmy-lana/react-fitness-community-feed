@@ -214,6 +214,27 @@ function pageOps(page) {
         const el = document.querySelector(sel);
         return el ? Reflect.get(el, propName) ?? null : null;
       }, selector, name),
+    clickText: async (containerSelector, label) => {
+      const handle = await page.evaluateHandle(
+        (sel, text) => {
+          const root = document.querySelector(sel);
+          if (!root) return null;
+          return (
+            [...root.querySelectorAll('button, a[href]')].find(
+              (el) =>
+                (el.textContent ?? '').trim() === text &&
+                el.checkVisibility({ visibilityProperty: true })
+            ) ?? null
+          );
+        },
+        containerSelector,
+        label
+      );
+      const element = handle.asElement();
+      if (!element) throw new Error(`No visible "${label}" inside ${containerSelector}`);
+      await element.click();
+      return element;
+    },
     count: (selector) => page.$$eval(selector, (els) => els.length).catch(() => 0),
     exists: async (selector) => (await page.$(selector)) !== null,
   };
@@ -676,9 +697,10 @@ async function runUiSuite(browser, baseUrl) {
         return el ? getComputedStyle(el).color : null;
       })(),
       svgCount: document.querySelectorAll('svg').length,
-      // Icons inside a closed dialog are display:none, so they are excluded.
+      // Icons in a hidden subtree (closed dialog, desktop-hidden nav) are
+      // legitimately zero-sized; only rendered ones must have a real box.
       zeroSizeSvgs: [...document.querySelectorAll('svg')]
-        .filter((svg) => !svg.closest('dialog:not([open])'))
+        .filter((svg) => svg.checkVisibility({ visibilityProperty: true }))
         .filter((svg) => {
           const r = svg.getBoundingClientRect();
           return r.width === 0 || r.height === 0;
@@ -799,17 +821,19 @@ async function runResponsiveSuite(browser, baseUrl) {
 
     // Layout assertions only apply once the shell renders its chrome; the feed
     // itself is checked at every width.
-    const shell = await page.evaluate(() => ({
-      bottomNav: Boolean(document.querySelector('[data-testid="bottom-nav"]')),
-      headerSearch: Boolean(document.querySelector('[data-testid="header-search"]')),
-    }));
+    const shell = await page.evaluate(() => {
+      const visible = (selector) =>
+        document.querySelector(selector)?.checkVisibility({ visibilityProperty: true }) ?? false;
+      return {
+        bottomNav: visible('[data-testid="bottom-nav"]'),
+        headerSearch: Boolean(document.querySelector('[data-testid="header-search"]')),
+      };
+    });
 
-    if (shell.bottomNav) {
-      check(
-        `${vp.width}px: ${vp.width < 768 ? 'bottom navigation is shown' : 'bottom navigation is hidden'}`,
-        (vp.width < 768) === shell.bottomNav
-      );
-    }
+    check(
+      `${vp.width}px: ${vp.width < 768 ? 'bottom navigation is shown' : 'bottom navigation is hidden'}`,
+      (vp.width < 768) === shell.bottomNav
+    );
 
     if (shell.headerSearch) {
       const searchWidth = await page.evaluate(
@@ -1022,7 +1046,7 @@ async function runInteractionSuite(browser, baseUrl) {
   await new Promise((r) => setTimeout(r, 200));
   check('clearing the filter restores the feed', (await ui.count('[data-testid="activity-card"]')) === 5);
 
-  await ui.click('[aria-label="Sort by kudos"]');
+  await ui.select('[data-testid="filter-sort"]', 'kudos');
   await new Promise((r) => setTimeout(r, 250));
   const sortedByKudos = await page.$$eval('[data-testid="activity-card"]', (els) => els.map((e) => Number(e.getAttribute('data-kudos'))));
   check(
@@ -1205,6 +1229,95 @@ async function runInteractionSuite(browser, baseUrl) {
     finalState.activities.length === 5 && finalState.challenges.length === 3,
     `${finalState.activities.length}/${finalState.challenges.length}`
   );
+
+  /* --- shell navigation -------------------------------------------------- */
+  console.log('  · shell navigation');
+
+  // The header search collapses to an icon below md and expands on tap.
+  const wasExpanded = await page.evaluate(
+    () => (document.querySelector('[data-testid="header-search"]')?.getBoundingClientRect().width ?? 0) > 0
+  );
+  if (wasExpanded) {
+    await ui.click('[aria-label="Close search"]');
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const collapsedWidth = await page.evaluate(
+    () => document.querySelector('[data-testid="header-search"]')?.getBoundingClientRect().width ?? -1
+  );
+  check('mobile header search starts collapsed', collapsedWidth === 0, `${collapsedWidth}px`);
+  await ui.click('[aria-label="Search activities"]');
+  await new Promise((r) => setTimeout(r, 250));
+  const expandedWidth = await page.evaluate(
+    () => document.querySelector('[data-testid="header-search"]')?.getBoundingClientRect().width ?? 0
+  );
+  check('tapping the search icon expands the field', expandedWidth > 0, `${expandedWidth}px`);
+  const togglePressed = await ui.attr('[aria-label="Close search"]', 'aria-expanded');
+  check('the toggle reports its state', togglePressed === 'true', String(togglePressed));
+  await ui.click('[aria-label="Close search"]');
+  await new Promise((r) => setTimeout(r, 250));
+
+  // Bottom nav destinations scroll their section under the sticky header.
+  for (const [label, target] of [
+    ['Weekly', 'weekly'],
+    ['Clubs', 'clubs'],
+    ['Feed', 'feed'],
+  ]) {
+    await ui.clickText('[data-testid="bottom-nav"]', label);
+    await new Promise((r) => setTimeout(r, 600));
+    const reached = await page.evaluate((navTarget) => {
+      const section = document.querySelector(`[data-nav-target="${navTarget}"]`);
+      if (!section) return { found: false };
+      const rect = section.getBoundingClientRect();
+      return {
+        found: true,
+        top: Math.round(rect.top),
+        scrolled: window.scrollY,
+        viewport: window.innerHeight,
+        // The last section cannot scroll to the top; the page just runs out.
+        atEnd:
+          window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2,
+        visible: rect.top < window.innerHeight && rect.bottom > 0,
+      };
+    }, target);
+    check(`bottom nav scrolls to ${label}`, reached.found && reached.visible === true, JSON.stringify(reached));
+    if (label !== 'Feed') {
+      check(
+        `${label} lands below the sticky header, not under it`,
+        reached.top >= 0 && (reached.top <= 120 || reached.atEnd),
+        `top ${reached.top}px after scrolling ${reached.scrolled}px`
+      );
+    }
+  }
+
+  /* --- empty state ------------------------------------------------------- */
+  console.log('  · empty state');
+  await ui.type('[data-testid="feed-search"]', 'no-such-activity-xyz');
+  await new Promise((r) => setTimeout(r, 300));
+  const emptyState = await page.evaluate(() => {
+    const feed = document.querySelector('[data-testid="activity-feed"]');
+    return {
+      cards: document.querySelectorAll('[data-testid="activity-card"]').length,
+      text: (feed?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      hasClear: Boolean(feed?.querySelector('button')),
+    };
+  });
+  check('an unmatched search shows no cards', emptyState.cards === 0);
+  check('the empty feed explains itself', emptyState.text.includes('No activities match these filters'), emptyState.text.slice(0, 80));
+  check('the empty state offers a way out', emptyState.hasClear);
+
+  await page.evaluate(() => {
+    const feed = document.querySelector('[data-testid="activity-feed"]');
+    const button = [...(feed?.querySelectorAll('button') ?? [])].find((b) => b.textContent.includes('Clear filters'));
+    button?.click();
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  const afterClear = await page.evaluate(() => ({
+    cards: document.querySelectorAll('[data-testid="activity-card"]').length,
+    search: document.querySelector('[data-testid="feed-search"]')?.value ?? null,
+    headerSearch: document.querySelector('[data-testid="header-search-input"]')?.value ?? null,
+  }));
+  check('clearing from the empty state restores the feed', afterClear.cards === 5, `${afterClear.cards} cards`);
+  check('clearing from the empty state clears the search box', afterClear.search === '' && afterClear.headerSearch === '', JSON.stringify(afterClear));
 
   await shot(page, 'interactions-390-after');
   await page.close();
