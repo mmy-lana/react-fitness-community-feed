@@ -1,4 +1,5 @@
 import type { HTMLAttributes } from 'react';
+import { initialsFromName } from '../../utils/formatters';
 
 export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg';
 
@@ -40,14 +41,6 @@ function hashName(name: string): number {
     hash = (hash * 33) ^ name.charCodeAt(i);
   }
   return Math.abs(hash);
-}
-
-/** Falls back to the first letters of the name when no initials are supplied. */
-function initialsFromName(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
 
 export function Avatar({

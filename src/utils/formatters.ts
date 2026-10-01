@@ -78,6 +78,13 @@ export function calculatePaceOrSpeed(
 
 const RELATIVE_TIME_FORMAT = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
 
+/** Two-letter monogram for avatars: "Alex Reynolds" becomes "AR". */
+export function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
 /** "3 hours ago" for recent posts, an absolute date once they age past a week. */
 export function formatRelativeTime(isoString: string): string {
   const then = new Date(isoString).getTime();

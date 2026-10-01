@@ -33,7 +33,7 @@ export function MetricPill({
         className={`text-base font-bold truncate ${emphasis ? 'text-strava-orange' : 'text-ink-primary'}`}
       >
         {value}
-        {unit ? <span className="ml-0.5 text-xs font-normal text-ink-tertiary">{unit}</span> : null}
+        {unit ? <span className="text-xs font-normal text-ink-tertiary"> {unit}</span> : null}
       </span>
     </div>
   );
