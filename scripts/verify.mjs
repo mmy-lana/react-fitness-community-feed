@@ -796,26 +796,47 @@ async function runUiSuite(browser, baseUrl) {
     ride: { title: 'Marin Headlands Coastal Loop', text: '52.30 km', unit: 'km/h' },
     swim: { title: 'Aquatic Park Open Water Laps', text: '1800 m', unit: '/100m' },
     hike: { title: 'Mount Tamalpais Summit Scramble', text: '14.20 km', unit: '/km' },
-    workout: { title: 'Core & Kettlebell Conditioning', text: 'kcal' },
+    workout: { title: 'Core & Kettlebell Conditioning', text: '45:00', unit: 'kcal' },
   };
   for (const [, expected] of Object.entries(expectedStats)) {
     const card = cardData.find((c) => c.title === expected.title);
     check(`stats for "${expected.title}"`, card?.stats.includes(expected.text) && card.stats.includes(expected.unit), card?.stats ?? 'missing');
   }
 
-  const routeCount = await ui.count('[data-testid="route-map"]');
+  // The expanded-route dialog keeps its own copy mounted, so count visible ones only.
+  const routeCount = await page.$$eval(
+    '[data-testid="route-map"]',
+    (els) => els.filter((el) => !el.closest('dialog:not([open])')).length
+  );
   check('route maps render for tracked activities', routeCount === 4, `${routeCount} route maps`);
-  const elevationCount = await ui.count('[data-testid="elevation-chart"]');
+  const elevationCount = await page.$$eval(
+    '[data-testid="elevation-chart"]',
+    (els) => els.filter((el) => !el.closest('dialog:not([open])')).length
+  );
   check('elevation charts render for tracked activities', elevationCount === 4, `${elevationCount} charts`);
 
   const gradientIds = await page.$$eval('linearGradient', (els) => els.map((e) => e.id));
   check('every SVG gradient id is unique', new Set(gradientIds).size === gradientIds.length, gradientIds.join(','));
   check('gradient ids contain no invalid characters', gradientIds.every((id) => /^[\w-]+$/.test(id)));
 
-  const routePaths = await page.$$eval('[data-testid="route-map"] path', (els) =>
-    els.map((el) => el.getAttribute('d') ?? '')
+  const routePaths = await page.$$eval('[data-testid="route-path"]', (els) =>
+    els
+      .filter((el) => !el.closest('dialog:not([open])'))
+      .map((el) => ({
+        d: el.getAttribute('d') ?? '',
+        stroke: getComputedStyle(el).stroke,
+      }))
   );
-  check('route paths carry geometry', routePaths.every((d) => d.startsWith('M ')));
+  check(
+    'route paths carry multi-segment geometry',
+    routePaths.length === 4 && routePaths.every((p) => /^M [\d.-]+ [\d.-]+( L [\d.-]+ [\d.-]+)+$/.test(p.d)),
+    JSON.stringify(routePaths.map((p) => p.d.slice(0, 24)))
+  );
+  check(
+    'routes stroke with their sport colour, not the default',
+    routePaths.every((p) => p.stroke.startsWith('url(')),
+    JSON.stringify(routePaths.map((p) => p.stroke))
+  );
 
   const weekly = await page.evaluate(
     () => document.querySelector('[data-testid="weekly-goal"]')?.textContent?.replace(/\s+/g, ' ').trim() ?? ''
@@ -881,16 +902,67 @@ async function runResponsiveSuite(browser, baseUrl) {
     );
     check(`${vp.width}px: feed renders all cards`, metrics.cards === 5, `${metrics.cards} cards`);
 
-    if (vp.width < 768) {
-      const layout = await page.evaluate(() => ({
-        bottomNavVisible: Boolean(document.querySelector('[data-testid="bottom-nav"]')),
-        headerSearchVisible: Boolean(
-          document.querySelector('[data-testid="header-search"]')?.getBoundingClientRect().width
-        ),
-      }));
-      check(`${vp.width}px: bottom navigation is present`, layout.bottomNavVisible);
-      check(`${vp.width}px: header collapses the search field`, layout.headerSearchVisible === false);
+    // The five-metric grid must not leave an orphan cell on a 2-column phone.
+    const metricGrid = await page.evaluate(() => {
+      const stats = document.querySelector('[data-testid="activity-card"] [data-testid="activity-stats"]');
+      if (!stats) return null;
+      const cells = [...stats.children];
+      const first = cells[0].getBoundingClientRect();
+      const last = cells[cells.length - 1].getBoundingClientRect();
+      return {
+        columns: getComputedStyle(stats).gridTemplateColumns.split(' ').length,
+        cells: cells.length,
+        firstWidth: Math.round(first.width),
+        lastWidth: Math.round(last.width),
+        overflows: Math.round(last.right - stats.getBoundingClientRect().right),
+      };
+    });
 
+    if (metricGrid) {
+      const spansTwo = metricGrid.lastWidth > metricGrid.firstWidth * 1.5;
+      check(
+        `${vp.width}px: metric grid uses ${vp.width < 390 ? 2 : 3} columns`,
+        metricGrid.columns === (vp.width < 390 ? 2 : 3),
+        `${metricGrid.columns} columns`
+      );
+      check(
+        `${vp.width}px: trailing metric ${vp.width < 390 ? 'spans' : 'does not span'} the orphan cell`,
+        vp.width < 390 ? spansTwo : !spansTwo,
+        `first ${metricGrid.firstWidth}px, last ${metricGrid.lastWidth}px`
+      );
+      check(
+        `${vp.width}px: metric grid stays inside its card`,
+        metricGrid.overflows <= 1,
+        `${metricGrid.overflows}px past the edge`
+      );
+    }
+
+    // Layout assertions only apply once the shell renders its chrome; the feed
+    // itself is checked at every width.
+    const shell = await page.evaluate(() => ({
+      bottomNav: Boolean(document.querySelector('[data-testid="bottom-nav"]')),
+      headerSearch: Boolean(document.querySelector('[data-testid="header-search"]')),
+    }));
+
+    if (shell.bottomNav) {
+      check(
+        `${vp.width}px: ${vp.width < 768 ? 'bottom navigation is shown' : 'bottom navigation is hidden'}`,
+        (vp.width < 768) === shell.bottomNav
+      );
+    }
+
+    if (shell.headerSearch) {
+      const searchWidth = await page.evaluate(
+        () => document.querySelector('[data-testid="header-search"]')?.getBoundingClientRect().width ?? 0
+      );
+      check(
+        `${vp.width}px: ${vp.width < 768 ? 'header collapses the search field' : 'header shows the search field'}`,
+        (vp.width < 768 ? searchWidth === 0 : searchWidth > 0),
+        `width ${Math.round(searchWidth)}`
+      );
+    }
+
+    if (vp.width < 768) {
       const smallTargets = await page.$$eval('button:not([disabled]), a[href]', (els) =>
         els
           .map((el) => {
@@ -905,27 +977,25 @@ async function runResponsiveSuite(browser, baseUrl) {
       );
       check(`${vp.width}px: touch targets are at least 40px`, smallTargets.length === 0, JSON.stringify(smallTargets.slice(0, 5)));
 
-      const lastCard = await page.evaluate(() => {
+      const footerClearance = await page.evaluate(() => {
         const cards = [...document.querySelectorAll('[data-testid="activity-card"]')];
         const last = cards[cards.length - 1];
-        if (!last) return null;
-        const rect = last.getBoundingClientRect();
-        return { bottom: Math.round(rect.bottom), docHeight: Math.round(document.documentElement.scrollHeight) };
+        const nav = document.querySelector('[data-testid="bottom-nav"]');
+        if (!last || !nav) return null;
+        const scrollY = window.scrollY;
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        const cardBottom = last.getBoundingClientRect().bottom + window.scrollY;
+        const navTop = nav.getBoundingClientRect().top + window.scrollY;
+        window.scrollTo(0, scrollY);
+        return Math.round(navTop - cardBottom);
       });
-      check(
-        `${vp.width}px: bottom nav does not cover the last card`,
-        lastCard !== null && lastCard.docHeight > 0,
-        JSON.stringify(lastCard)
-      );
-    } else {
-      const layout = await page.evaluate(() => ({
-        bottomNavVisible: Boolean(document.querySelector('[data-testid="bottom-nav"]')),
-        headerSearchVisible: Boolean(
-          document.querySelector('[data-testid="header-search"]')?.getBoundingClientRect().width
-        ),
-      }));
-      check(`${vp.width}px: bottom navigation is hidden`, layout.bottomNavVisible === false);
-      check(`${vp.width}px: header shows the search field`, layout.headerSearchVisible === true);
+      if (footerClearance !== null) {
+        check(
+          `${vp.width}px: bottom navigation clears the last card when scrolled`,
+          footerClearance >= 0,
+          `overlap ${footerClearance}px`
+        );
+      }
     }
 
     await shot(page, `responsive-${vp.name}`);
