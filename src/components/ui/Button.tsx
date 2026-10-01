@@ -32,9 +32,11 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
 };
 
 const SIZE_CLASSES: Record<ButtonSize, string> = {
-  sm: 'min-h-11 px-3 text-xs gap-1.5',
-  md: 'min-h-11 px-4 text-sm gap-2',
-  lg: 'min-h-11 px-5 text-base gap-2',
+  // min-w-11 keeps a short label ("All", "42") from collapsing below the
+  // 44px touch target floor.
+  sm: 'min-h-11 min-w-11 px-3 text-xs gap-1.5',
+  md: 'min-h-11 min-w-11 px-4 text-sm gap-2',
+  lg: 'min-h-11 min-w-11 px-5 text-base gap-2',
   icon: 'min-h-11 min-w-11 w-11 h-11 p-0',
 };
 
