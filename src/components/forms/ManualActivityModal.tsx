@@ -1,5 +1,6 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import type { NewActivityInput, PrivacySetting, SportType } from '../../types/fitness';
+import { stripInvisibleCharacters } from '../../utils/formatters';
 import { METRIC_SPORTS, SPORT_LABEL_MAP, SPORT_TYPES } from '../../utils/sportMaps';
 import type { RoutePattern } from '../../utils/routeGenerator';
 import { AlertIcon } from '../icons/ActionIcons';
@@ -187,15 +188,38 @@ export function ManualActivityModal({
     setState((previous) => ({ ...previous, [key]: value }));
   };
 
+  /** Converts the typed distance when the unit changes, so 10 km does not become a 10 m swim. */
+  const convertDistance = (value: string, from: 'km' | 'm', to: 'km' | 'm'): string => {
+    if (from === to || value.trim() === '') return value;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return value;
+    const converted = to === 'm' ? parsed * 1000 : parsed / 1000;
+    // toFixed absorbs the float noise 1800 / 1000 would otherwise leave behind.
+    return String(Number(converted.toFixed(3)));
+  };
+
   const handleSportChange = (sport: SportType) => {
     const isNowWorkout = sport === 'workout';
+    const nextUnit = METRIC_SPORTS[sport] ? 'm' : 'km';
     setState((previous) => ({
       ...previous,
       sportType: sport,
-      routePattern: isNowWorkout ? 'stationary' : previous.routePattern === 'stationary' ? 'loop' : previous.routePattern,
-      distance: isNowWorkout ? '' : previous.distance,
+      routePattern: isNowWorkout
+        ? 'stationary'
+        : previous.routePattern === 'stationary'
+          ? 'loop'
+          : previous.routePattern,
+      distance: isNowWorkout ? '' : convertDistance(previous.distance, previous.distanceUnit, nextUnit),
       elevation: isNowWorkout ? '' : previous.elevation,
-      distanceUnit: METRIC_SPORTS[sport] ? 'm' : 'km',
+      distanceUnit: nextUnit,
+    }));
+  };
+
+  const handleDistanceUnitChange = (unit: 'km' | 'm') => {
+    setState((previous) => ({
+      ...previous,
+      distanceUnit: unit,
+      distance: convertDistance(previous.distance, previous.distanceUnit, unit),
     }));
   };
 
@@ -217,8 +241,8 @@ export function ManualActivityModal({
     const distanceValue = parseNumber(state.distance) ?? 0;
 
     const saved = onSubmit({
-      title: state.title.trim(),
-      description: state.description.trim(),
+      title: stripInvisibleCharacters(state.title),
+      description: stripInvisibleCharacters(state.description),
       sportType: state.sportType,
       startTime: new Date(`${state.date}T${state.time}`).toISOString(),
       durationSeconds: minutes * 60 + seconds,
@@ -390,7 +414,7 @@ export function ManualActivityModal({
                       type="button"
                       aria-pressed={isActive}
                       disabled={isLocked}
-                      onClick={() => update('distanceUnit', unit)}
+                      onClick={() => handleDistanceUnitChange(unit)}
                       className={`${distanceUnitButton} ${
                         isActive
                           ? 'border-strava-orange/50 bg-strava-orange/15 text-strava-orange'

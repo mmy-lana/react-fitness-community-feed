@@ -61,11 +61,15 @@ export function RouteMapCanvas({
         className,
       ].join(' ')}
     >
+      {/* Hidden from assistive tech: the wrapping button already carries the
+          control's name, and the shape of a track is not describable in text. */}
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         width="100%"
         height="100%"
         preserveAspectRatio="xMidYMid meet"
+        aria-hidden="true"
+        focusable="false"
         className="block h-full w-full min-w-0"
       >
         <defs>

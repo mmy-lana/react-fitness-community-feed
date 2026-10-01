@@ -240,6 +240,24 @@ function pageOps(page) {
   };
 }
 
+/**
+ * Writes a value into a React-controlled field the way a paste would, so text
+ * containing non-ASCII control characters can be exercised.
+ */
+async function setFieldValue(page, selector, value) {
+  await page.evaluate(
+    (sel, text) => {
+      const el = document.querySelector(sel);
+      if (!el) throw new Error(`No field matches ${sel}`);
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement;
+      Object.getOwnPropertyDescriptor(proto.prototype, 'value').set.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+    selector,
+    value
+  );
+}
+
 /** Presses and releases on the dialog itself, the way a backdrop tap arrives. */
 async function tapBackdrop(page) {
   await page.evaluate(() => {
@@ -778,7 +796,17 @@ async function runUiSuite(browser, baseUrl) {
     const unlabelled = buttons.filter(
       (b) => !b.textContent?.trim() && !b.getAttribute('aria-label') && !b.getAttribute('title')
     );
+    // Every icon and chart must either be hidden or carry a real name.
+    const unnamed = [...document.querySelectorAll('svg')].filter((svg) => {
+      const hidden = svg.getAttribute('aria-hidden') === 'true';
+      const labelled =
+        svg.getAttribute('role') === 'img' &&
+        Boolean(svg.getAttribute('aria-label') || svg.querySelector('title'));
+      return !hidden && !labelled;
+    });
+
     return {
+      decorativeIconsHidden: unnamed.length,
       buttonCount: buttons.length,
       unlabelled: unlabelled.length,
       dialogsWithoutName: [...document.querySelectorAll('dialog')].filter(
@@ -789,6 +817,11 @@ async function runUiSuite(browser, baseUrl) {
     };
   });
   check('every button has an accessible name', a11y.unlabelled === 0, `${a11y.unlabelled} of ${a11y.buttonCount}`);
+  check(
+    'every icon and chart is either hidden or labelled',
+    a11y.decorativeIconsHidden === 0,
+    `${a11y.decorativeIconsHidden} graphics exposed without a name`
+  );
   check('dialogs carry a heading', a11y.dialogsWithoutName === 0, `${a11y.dialogsWithoutName} unnamed`);
   check('page exposes a single h1', a11y.h1Count === 1, `${a11y.h1Count} h1 elements`);
   check('document declares a language', a11y.lang === 'en', a11y.lang);
@@ -1436,6 +1469,95 @@ async function runInteractionSuite(browser, baseUrl) {
     'demo reset still works after a busy session',
     finalState.activities.length === 5 && finalState.challenges.length === 3,
     `${finalState.activities.length}/${finalState.challenges.length}`
+  );
+
+  /* --- unit conversion and text sanitization ------------------------------ */
+  console.log('  · unit conversion and sanitization');
+
+  // UI-03: switching sport must convert, not reinterpret, the typed distance.
+  await openModal();
+  await ui.type('[data-testid="activity-title"]', 'Unit Conversion Ride');
+  await ui.type('[data-testid="activity-duration-minutes"]', '45');
+  await ui.type('[data-testid="activity-distance"]', '10');
+  await ui.type('[data-testid="activity-elevation"]', '100');
+  await ui.select('[data-testid="activity-sport"]', 'swim');
+  await new Promise((r) => setTimeout(r, 200));
+  const swimDistance = await ui.prop('[data-testid="activity-distance"]', 'value');
+  check('10 km becomes 10000 m when switching to swimming', swimDistance === '10000', String(swimDistance));
+
+  await ui.select('[data-testid="activity-sport"]', 'ride');
+  await new Promise((r) => setTimeout(r, 200));
+  const rideDistance = await ui.prop('[data-testid="activity-distance"]', 'value');
+  check('switching back returns the kilometers', rideDistance === '10', String(rideDistance));
+
+  // The manual unit toggle converts as well: km -> m, then back.
+  const clickDistanceUnit = async (label) => {
+    await page.evaluate((wanted) => {
+      const buttons = [...document.querySelectorAll('[data-testid="activity-distance-unit"] button')];
+      buttons.find((b) => b.textContent.trim() === wanted)?.click();
+    }, label);
+    await new Promise((r) => setTimeout(r, 200));
+  };
+
+  await clickDistanceUnit('m');
+  const toggledDistance = await ui.prop('[data-testid="activity-distance"]', 'value');
+  check('the m toggle converts the value to meters', toggledDistance === '10000', String(toggledDistance));
+
+  await clickDistanceUnit('km');
+  const backToKm = await ui.prop('[data-testid="activity-distance"]', 'value');
+  check('the km toggle converts back to kilometers', backToKm === '10', String(backToKm));
+
+  // SEC-02: bidi overrides and control codes never reach storage.
+  await setFieldValue(page, '[data-testid="activity-title"]', 'Morning Run\u202Eexe.txt');
+  await setFieldValue(page, '[data-testid="activity-description"]', 'Fine until\u0007the bell\u2066');
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    'invisible characters still allow a valid submission',
+    (await submitDisabled()) === null
+  );
+  await ui.click('[data-testid="activity-submit"]');
+  await new Promise((r) => setTimeout(r, 350));
+  const sanitized = (await readStorage()).activities[0];
+  const hiddenChars = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/;
+  check(
+    'the stored title carries no bidi overrides or control codes',
+    sanitized?.title === 'Morning Runexe.txt',
+    JSON.stringify(sanitized?.title)
+  );
+  check(
+    'the stored description carries no control codes',
+    sanitized?.description === 'Fine untilthe bell',
+    JSON.stringify(sanitized?.description)
+  );
+  check(
+    'stored free text is free of hidden characters',
+    !hiddenChars.test(sanitized?.title ?? '') && !hiddenChars.test(sanitized?.description ?? '')
+  );
+
+  // SEC-02 for comments: paste a bidi override into the composer.
+  await ui.click('[data-testid="comment-button"]');
+  await new Promise((r) => setTimeout(r, 250));
+  await setFieldValue(page, '[data-testid="comment-input"]', 'Legit comment\u202Ehidden');
+  await new Promise((r) => setTimeout(r, 200));
+  await ui.click('[data-testid="comment-submit"]');
+  await new Promise((r) => setTimeout(r, 300));
+  const sanitizedComments = (await readStorage()).activities
+    .flatMap((a) => a.comments)
+    .map((c) => c.content);
+  check(
+    'comments are stored without bidi overrides',
+    sanitizedComments.includes('Legit commenthidden'),
+    JSON.stringify(sanitizedComments)
+  );
+  await page.keyboard.press('Escape');
+  await new Promise((r) => setTimeout(r, 250));
+
+  await ui.click('[aria-label="Reset demo data"]');
+  await new Promise((r) => setTimeout(r, 400));
+  check(
+    'the dataset is restored before the remaining suites run',
+    (await readStorage()).activities.length === 5,
+    `${(await readStorage()).activities.length} activities`
   );
 
   /* --- shell navigation -------------------------------------------------- */
