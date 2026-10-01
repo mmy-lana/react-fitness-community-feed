@@ -33,7 +33,7 @@ const args = process.argv.slice(2);
 const suiteArg = args.find((a) => a.startsWith('--suite='))?.slice('--suite='.length);
 const urlArg = args.find((a) => a.startsWith('--url='))?.slice('--url='.length);
 
-const ALL_SUITES = ['modules', 'ui', 'responsive', 'interactions'];
+const ALL_SUITES = ['modules', 'primitives', 'ui', 'responsive', 'interactions'];
 const suites = suiteArg ? suiteArg.split(',') : ALL_SUITES;
 
 /** Viewport matrix from the plan's acceptance criteria. */
@@ -197,7 +197,9 @@ function pageOps(page) {
     },
     clear: async (selector) => {
       const element = await require(selector);
-      await element.click({ clickCount: 3 });
+      await element.focus();
+      // Select the whole value explicitly: select-all shortcuts are unreliable headless.
+      await element.evaluate((el) => el.setSelectionRange?.(0, el.value.length));
       await page.keyboard.press('Backspace');
     },
     attr: async (selector, name) =>
@@ -206,6 +208,12 @@ function pageOps(page) {
         selector,
         name
       ),
+    /** Live DOM property — `value` on inputs/selects is not an attribute. */
+    prop: async (selector, name) =>
+      page.evaluate((sel, propName) => {
+        const el = document.querySelector(sel);
+        return el ? Reflect.get(el, propName) ?? null : null;
+      }, selector, name),
     count: (selector) => page.$$eval(selector, (els) => els.length).catch(() => 0),
     exists: async (selector) => (await page.$(selector)) !== null,
   };
@@ -488,6 +496,255 @@ async function runModuleSuite(browser, baseUrl) {
 function track0Points() {
   // The climb track used above is deterministic: 10,000 m / 150 m per sample.
   return Math.min(120, Math.max(30, Math.round(10000 / 150)));
+}
+
+/* ---------------------------------------------------------- primitives suite */
+
+/**
+ * Design-system phase: the primitives are the only surface the app exposes,
+ * so this suite asserts their contract — 44px targets, accessible names,
+ * validation wiring and native dialog behaviour.
+ */
+async function runPrimitivesSuite(browser, baseUrl) {
+  console.log('\n▸ primitives (production build)');
+  const page = await newPage(browser, { width: 390, height: 844 });
+  const ui = pageOps(page);
+  await page.goto(baseUrl, { waitUntil: 'networkidle2' });
+
+  const overview = await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll('button')];
+    const labels = [...document.querySelectorAll('label')];
+    return {
+      buttons: buttons.length,
+      unlabelled: buttons.filter(
+        (b) => !b.textContent?.trim() && !b.getAttribute('aria-label') && !b.getAttribute('title')
+      ).length,
+      undersized: buttons
+        .map((b) => {
+          const r = b.getBoundingClientRect();
+          return {
+            label: (b.getAttribute('aria-label') ?? b.textContent ?? '').trim().slice(0, 20),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          };
+        })
+        .filter((b) => b.w > 0 && b.h > 0 && (b.h < 44 || b.w < 44)),
+      labels: labels.length,
+      inputsWithoutLabel: [...document.querySelectorAll('input, select')].filter(
+        (el) => !document.querySelector(`label[for="${el.id}"]`)
+      ).length,
+      h1: document.querySelectorAll('h1').length,
+      sportBadges: document.querySelectorAll('[class*="border-sport-"]').length,
+    };
+  });
+
+  check('every control has a button role', overview.buttons > 0, `${overview.buttons} buttons`);
+  check('every button has an accessible name', overview.unlabelled === 0, `${overview.unlabelled} unlabelled`);
+  check(
+    'every button is at least 44px in both axes',
+    overview.undersized.length === 0,
+    JSON.stringify(overview.undersized)
+  );
+  check('every field is tied to a visible label', overview.inputsWithoutLabel === 0, `${overview.inputsWithoutLabel} orphaned`);
+  check('labels are rendered', overview.labels >= 6, `${overview.labels} labels`);
+  check('shell exposes one h1', overview.h1 === 1, `${overview.h1}`);
+
+  /* --- theme tokens and contrast ---------------------------------------- */
+  const theme = await page.evaluate(() => {
+    const parse = (value) => {
+      const parts = String(value).match(/[\d.]+/g)?.map(Number) ?? [];
+      return parts.slice(0, 3);
+    };
+    const luminance = ([r, g, b]) => {
+      const channel = (v) => {
+        const c = v / 255;
+        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    };
+    const contrast = (fg, bg) => {
+      const [hi, lo] = [luminance(fg), luminance(bg)].sort((a, b) => b - a);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+
+    const probe = document.createElement('div');
+    probe.style.color = 'rgb(18,18,20)';
+    document.body.appendChild(probe);
+    const pageBg = parse(getComputedStyle(document.body).backgroundColor);
+    probe.remove();
+
+    const themeSample = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      let bgEl = el;
+      // Walk up until a non-transparent background is found.
+      while (bgEl && (getComputedStyle(bgEl).backgroundColor === 'rgba(0, 0, 0, 0)' || getComputedStyle(bgEl).backgroundColor === 'transparent')) {
+        bgEl = bgEl.parentElement;
+      }
+      return {
+        color: parse(style.color),
+        bg: parse(bgEl ? getComputedStyle(bgEl).backgroundColor : 'rgb(18,18,20)'),
+        fontSize: parseFloat(style.fontSize),
+      };
+    };
+
+    // Every emitted rule, so we can prove Tailwind saw the static classes.
+    let css = '';
+    for (const sheet of document.styleSheets) {
+      try {
+        for (const rule of sheet.cssRules) css += rule.cssText;
+      } catch {
+        // cross-origin sheet: nothing to inspect
+      }
+    }
+
+    return {
+      pageBg,
+      badgeBg: [...document.querySelectorAll('[data-testid="sport-badge"]')].map((el) => getComputedStyle(el).backgroundColor),
+      badgeText: [...document.querySelectorAll('[data-testid="sport-badge"]')].map((el) => getComputedStyle(el).color),
+      svgCount: document.querySelectorAll('svg').length,
+      // Icons inside a closed dialog are display:none, so they are excluded.
+      zeroSizeSvgs: [...document.querySelectorAll('svg')]
+        .filter((svg) => !svg.closest('dialog:not([open])'))
+        .filter((svg) => {
+          const r = svg.getBoundingClientRect();
+          return r.width === 0 || r.height === 0;
+        }).length,
+      cssLength: css.length,
+      hasStravaOrange: /\.bg-strava-orange(?![-\w])/.test(css),
+      hasSportText: /\.text-sport-swim(?![-\w])/.test(css),
+      hasSportBorder: /\.border-sport-run\\\/30(?![-\w])/.test(css),
+      hasSurface: /\.bg-surface-700(?![-\w])/.test(css),
+      hasXsBreakpoint: /@media\s*\(width\s*>=\s*390px\)/.test(css),
+      hasThemeVars: css.includes('--color-strava-orange'),
+      ratios: {
+        primary: contrastOf(themeSample('h1')),
+        secondary: contrastOf(themeSample('label')),
+        tertiary: contrastOf(themeSample('h2')),
+      },
+    };
+
+    function contrastOf(sample) {
+      if (!sample) return null;
+      const [hi, lo] = [luminance(sample.color), luminance(sample.bg)].sort((a, b) => b - a);
+      return Number(((hi + 0.05) / (lo + 0.05)).toFixed(2));
+    }
+  });
+
+  check('page paints the surface-900 token', theme.pageBg.join(',') === '18,18,20', theme.pageBg.join(','));
+  check('Tailwind emitted the custom color variables', theme.hasThemeVars);
+  check('Tailwind emitted bg-strava-orange', theme.hasStravaOrange);
+  check('Tailwind emitted sport text colors', theme.hasSportText);
+  check('Tailwind emitted opacity-modified sport borders', theme.hasSportBorder);
+  check('Tailwind emitted surface tokens', theme.hasSurface);
+  check('Tailwind emitted the 390px xs breakpoint', theme.hasXsBreakpoint, 'no @media (width >= 390px)');
+  check('heading contrast ≥ 7:1', theme.ratios.primary >= 7, `${theme.ratios.primary}:1`);
+  check('secondary text contrast ≥ 4.5:1', theme.ratios.secondary >= 4.5, `${theme.ratios.secondary}:1`);
+  check('tertiary text contrast ≥ 4.5:1', theme.ratios.tertiary >= 4.5, `${theme.ratios.tertiary}:1`);
+  check(
+    'each sport badge renders a distinct tint',
+    new Set(theme.badgeBg).size >= 5,
+    JSON.stringify(theme.badgeBg)
+  );
+  check(
+    'each sport badge renders a distinct accent colour',
+    new Set(theme.badgeText).size >= 5,
+    JSON.stringify(theme.badgeText)
+  );
+  check('icons render at a non-zero size', theme.zeroSizeSvgs === 0 && theme.svgCount > 0, `${theme.zeroSizeSvgs}/${theme.svgCount} empty`);
+
+  const sportLabels = await page.$$eval('[data-testid="sport-badge"]', (els) =>
+    els.map((el) => (el.textContent ?? '').trim()).filter(Boolean)
+  );
+  check(
+    'all five sports render a labelled badge',
+    ['Run', 'Ride', 'Swim', 'Hike', 'Workout'].every((label) => sportLabels.some((t) => t.includes(label))),
+    JSON.stringify(sportLabels)
+  );
+
+  const invalidField = await page.evaluate(() => {
+    const input = document.querySelector('[data-testid="preview-invalid"]');
+    const messageId = input?.getAttribute('aria-describedby');
+    return {
+      ariaInvalid: input?.getAttribute('aria-invalid'),
+      describedBy: messageId ?? null,
+      alertText: messageId ? document.getElementById(messageId)?.textContent : null,
+      alertRole: messageId ? document.getElementById(messageId)?.getAttribute('role') : null,
+    };
+  });
+  check('invalid field is marked aria-invalid', invalidField.ariaInvalid === 'true', String(invalidField.ariaInvalid));
+  check('invalid field points at its message', Boolean(invalidField.describedBy));
+  check('validation message is announced', invalidField.alertRole === 'alert' && Boolean(invalidField.alertText), JSON.stringify(invalidField));
+
+  await ui.select('[data-testid="preview-sport"]', 'swim');
+  await new Promise((r) => setTimeout(r, 150));
+  const selected = await ui.prop('[data-testid="preview-sport"]', 'value');
+  check('select reflects the chosen value', selected === 'swim', String(selected));
+  const unitSwapped = await page.evaluate(() =>
+    [...document.querySelectorAll('span')].some((el) => el.textContent === 'm' && el.className.includes('pointer-events-none'))
+  );
+  check('distance unit follows the sport', unitSwapped);
+
+  await ui.clear('[data-testid="preview-title"]');
+  await new Promise((r) => setTimeout(r, 150));
+  const clearedTitle = await ui.prop('[data-testid="preview-title"]', 'value');
+  check('controlled input follows its value prop', clearedTitle === '', String(clearedTitle));
+
+  // --- dialog behaviour ---------------------------------------------------
+  await ui.click('[data-testid="noop"]').catch(() => {});
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Open modal preview')
+    );
+    button?.click();
+  });
+  await new Promise((r) => setTimeout(r, 250));
+  const opened = await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[open]');
+    return {
+      open: Boolean(dialog),
+      labelled: Boolean(dialog?.getAttribute('aria-labelledby')),
+      heading: dialog?.querySelector('h2')?.textContent ?? '',
+      scrollLocked: document.documentElement.classList.contains('overflow-hidden'),
+      focusInside: Boolean(dialog?.contains(document.activeElement)),
+    };
+  });
+  check('modal opens from the shell', opened.open);
+  check('modal heading renders', opened.heading === 'Modal primitive', opened.heading);
+  check('modal is labelled for assistive tech', opened.labelled);
+  check('modal locks page scrolling', opened.scrollLocked);
+  check('modal moves focus inside', opened.focusInside);
+
+  await shot(page, 'primitives-390-modal');
+  await page.keyboard.press('Escape');
+  await new Promise((r) => setTimeout(r, 250));
+  const closed = await page.evaluate(() => ({
+    open: Boolean(document.querySelector('dialog[open]')),
+    scrollLocked: document.documentElement.classList.contains('overflow-hidden'),
+  }));
+  check('Escape closes the modal', closed.open === false);
+  check('closing the modal restores scrolling', closed.scrollLocked === false);
+
+  // Backdrop dismissal.
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Open modal preview')
+    );
+    button?.click();
+  });
+  await new Promise((r) => setTimeout(r, 250));
+  await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[open]');
+    dialog?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 250));
+  check('backdrop click closes the modal', await page.evaluate(() => !document.querySelector('dialog[open]')));
+  check('backdrop dismissal restores scrolling', await page.evaluate(() => !document.documentElement.classList.contains('overflow-hidden')));
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await shot(page, 'primitives-390');
+  await page.close();
 }
 
 /* --------------------------------------------------------------- ui suite */
@@ -865,6 +1122,7 @@ async function main() {
   const browser = await launchBrowser();
   try {
     if (suites.includes('modules')) await runModuleSuite(browser, urlArg ?? DEV_URL);
+    if (suites.includes('primitives')) await runPrimitivesSuite(browser, urlArg ?? PREVIEW_URL);
     if (suites.includes('ui')) await runUiSuite(browser, urlArg ?? PREVIEW_URL);
     if (suites.includes('responsive')) await runResponsiveSuite(browser, urlArg ?? PREVIEW_URL);
     if (suites.includes('interactions')) await runInteractionSuite(browser, urlArg ?? PREVIEW_URL);
