@@ -95,12 +95,15 @@ export function haversineMeters(
 ): number {
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
+  const rawA =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos((lat1 * Math.PI) / 180) *
       Math.cos((lat2 * Math.PI) / 180) *
       Math.sin(dLon / 2) *
       Math.sin(dLon / 2);
+  // Rounding can push `a` a hair past 1 for near-antipodal points, which would
+  // make Math.sqrt(1 - a) a NaN and poison every downstream sum.
+  const a = Math.min(1, Math.max(0, rawA));
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return EARTH_RADIUS_METERS * c;
 }
@@ -146,13 +149,23 @@ const MET_MAP: Record<SportType, number> = {
   workout: 5.5,
 };
 
-/** Estimates calories burned from duration, MET and body weight. */
+/** Used when a sport is missing from the table (light activity). */
+const DEFAULT_MET = 5.0;
+
+/**
+ * Estimates calories burned from duration, MET and body weight.
+ *
+ * The MET lookup is typed, but the sport can arrive from persisted data that
+ * predates a rename, so an unmapped value falls back to light activity rather
+ * than multiplying `undefined` into a NaN.
+ */
 export function calculateCalories(
   durationSeconds: number,
   sport: SportType,
   weightKg: number = 72
 ): number {
   if (durationSeconds <= 0 || weightKg <= 0) return 0;
+  const met = MET_MAP[sport] ?? DEFAULT_MET;
   const hours = durationSeconds / 3600;
-  return Math.round(MET_MAP[sport] * weightKg * hours);
+  return Math.round(met * weightKg * hours);
 }

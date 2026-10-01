@@ -26,7 +26,7 @@ export function toggleKudos(activityId: string): boolean {
             ...activity.kudos,
             {
               userId: CURRENT_USER_ID,
-              username: currentUser.fullName,
+              username: currentUser.username,
               timestamp: new Date().toISOString(),
             },
           ];

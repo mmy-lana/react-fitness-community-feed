@@ -1,4 +1,13 @@
-import type { Activity, Challenge, UserProfile } from '../types/fitness';
+import type {
+  Activity,
+  ActivityComment,
+  Challenge,
+  GeoPoint,
+  KudosRecord,
+  PrivacySetting,
+  SportType,
+  UserProfile,
+} from '../types/fitness';
 import { CURRENT_USER_ID } from '../utils/seedAthletes';
 import { generateSyntheticRoute } from '../utils/routeGenerator';
 import { calculateCalories } from '../utils/telemetryMath';
@@ -56,15 +65,217 @@ function broadcastLocalChange(): void {
   notify();
 }
 
-/** Never throws: corrupted JSON degrades to the caller's fallback. */
-function safeParse<T>(raw: string | null, fallback: T): T {
-  if (!raw) return fallback;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed === null ? fallback : (parsed as T);
-  } catch {
-    return fallback;
+/**
+ * Everything read back from localStorage is untrusted: another tab, an older
+ * build, or a curious user can put any value under these keys. Parsing
+ * therefore validates shape field by field and substitutes defaults rather than
+ * casting, so one malformed record degrades that record instead of the app.
+ */
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function readNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function readNonNegative(value: unknown, fallback = 0): number {
+  const parsed = readNumber(value, fallback);
+  return parsed > 0 ? parsed : 0;
+}
+
+function readArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** Valid ISO timestamp, or `fallback` when the stored value is unusable. */
+function readIsoDate(value: unknown, fallback: string): string {
+  if (typeof value === 'string') {
+    const time = new Date(value).getTime();
+    if (!Number.isNaN(time)) return value;
   }
+  return fallback;
+}
+
+function readSport(value: unknown): SportType {
+  switch (value) {
+    case 'run':
+    case 'ride':
+    case 'swim':
+    case 'hike':
+    case 'workout':
+      return value;
+    default:
+      return 'run';
+  }
+}
+
+function readPrivacy(value: unknown): PrivacySetting {
+  return value === 'followers' || value === 'private' ? value : 'public';
+}
+
+function readSportList(value: unknown): SportType[] {
+  const seen = new Set<SportType>();
+  for (const entry of readArray(value)) {
+    if (entry === 'run' || entry === 'ride' || entry === 'swim' || entry === 'hike' || entry === 'workout') {
+      seen.add(entry);
+    }
+  }
+  // A challenge with no eligible sport could never be completed.
+  return seen.size > 0 ? [...seen] : ['run'];
+}
+
+function sanitizeGeoPoints(value: unknown): GeoPoint[] {
+  const points: GeoPoint[] = [];
+  for (const entry of readArray(value)) {
+    if (!isRecord(entry)) continue;
+    const latitude = readNumber(entry.latitude, Number.NaN);
+    const longitude = readNumber(entry.longitude, Number.NaN);
+    if (Number.isNaN(latitude) || Number.isNaN(longitude)) continue;
+    // Out-of-range coordinates would stretch the projection across the globe.
+    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) continue;
+    points.push({
+      latitude,
+      longitude,
+      elevationMeters: readNonNegative(entry.elevationMeters),
+      timestampOffsetSeconds: readNonNegative(entry.timestampOffsetSeconds),
+    });
+  }
+  return points;
+}
+
+function sanitizeKudos(value: unknown): KudosRecord[] {
+  const kudos: KudosRecord[] = [];
+  const now = new Date().toISOString();
+  for (const entry of readArray(value)) {
+    if (!isRecord(entry)) continue;
+    const userId = readString(entry.userId);
+    if (!userId) continue;
+    kudos.push({
+      userId,
+      username: readString(entry.username, 'athlete'),
+      timestamp: readIsoDate(entry.timestamp, now),
+    });
+  }
+  return kudos;
+}
+
+function sanitizeComments(value: unknown): ActivityComment[] {
+  const comments: ActivityComment[] = [];
+  const now = new Date().toISOString();
+  for (const entry of readArray(value)) {
+    if (!isRecord(entry)) continue;
+    const id = readString(entry.id);
+    if (!id) continue;
+    const content = readString(entry.content);
+    if (!content.trim()) continue;
+    comments.push({
+      id,
+      activityId: readString(entry.activityId),
+      userId: readString(entry.userId),
+      userName: readString(entry.userName, 'Community Athlete'),
+      content,
+      createdAt: readIsoDate(entry.createdAt, now),
+    });
+  }
+  return comments;
+}
+
+/** Returns null when a record cannot be repaired into a usable activity. */
+export function sanitizeActivity(value: unknown): Activity | null {
+  if (!isRecord(value)) return null;
+  const id = readString(value.id);
+  if (!id) return null;
+
+  const now = new Date().toISOString();
+  return {
+    id,
+    userId: readString(value.userId, CURRENT_USER_ID),
+    title: readString(value.title, 'Untitled activity'),
+    description: readString(value.description),
+    sportType: readSport(value.sportType),
+    startTime: readIsoDate(value.startTime, now),
+    durationSeconds: readNonNegative(value.durationSeconds),
+    distanceMeters: readNonNegative(value.distanceMeters),
+    elevationGainMeters: readNonNegative(value.elevationGainMeters),
+    calories: readNonNegative(value.calories),
+    coordinates: sanitizeGeoPoints(value.coordinates),
+    kudos: sanitizeKudos(value.kudos),
+    comments: sanitizeComments(value.comments),
+    privacy: readPrivacy(value.privacy),
+    createdAt: readIsoDate(value.createdAt, now),
+    updatedAt: readIsoDate(value.updatedAt, now),
+  };
+}
+
+export function sanitizeUserProfile(value: unknown, fallback: UserProfile): UserProfile {
+  if (!isRecord(value)) return fallback;
+  return {
+    id: readString(value.id, fallback.id),
+    username: readString(value.username, fallback.username),
+    fullName: readString(value.fullName, fallback.fullName),
+    location: readString(value.location, fallback.location),
+    bio: readString(value.bio),
+    avatarInitials: readString(value.avatarInitials, fallback.avatarInitials).slice(0, 3),
+    followingCount: readNonNegative(value.followingCount),
+    followersCount: readNonNegative(value.followersCount),
+    weeklyGoalMeters: readNonNegative(value.weeklyGoalMeters, fallback.weeklyGoalMeters),
+    weeklyGoalSport: readSport(value.weeklyGoalSport ?? fallback.weeklyGoalSport),
+    createdAt: readIsoDate(value.createdAt, fallback.createdAt),
+  };
+}
+
+/** Returns null when a record cannot be repaired into a usable challenge. */
+export function sanitizeChallenge(value: unknown): Challenge | null {
+  if (!isRecord(value)) return null;
+  const id = readString(value.id);
+  if (!id) return null;
+
+  const now = new Date().toISOString();
+  return {
+    id,
+    title: readString(value.title, 'Untitled challenge'),
+    description: readString(value.description),
+    metric: value.metric === 'elevation' ? 'elevation' : 'distance',
+    sportTypes: readSportList(value.sportTypes),
+    targetValue: readNonNegative(value.targetValue, 1),
+    startDate: readIsoDate(value.startDate, now),
+    endDate: readIsoDate(value.endDate, now),
+    joined: value.joined === true,
+    participantCount: readNonNegative(value.participantCount),
+    badgeCode: readString(value.badgeCode, id.toUpperCase()),
+  };
+}
+
+/** Never throws: malformed JSON degrades to null for the sanitizers to replace. */
+function safeParse(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function parseActivities(raw: string | null): Activity[] {
+  return readArray(safeParse(raw))
+    .map(sanitizeActivity)
+    .filter((activity): activity is Activity => activity !== null);
+}
+
+function parseUserProfile(raw: string | null, fallback: UserProfile): UserProfile {
+  return sanitizeUserProfile(safeParse(raw), fallback);
+}
+
+function parseChallenges(raw: string | null): Challenge[] {
+  return readArray(safeParse(raw))
+    .map(sanitizeChallenge)
+    .filter((challenge): challenge is Challenge => challenge !== null);
 }
 
 function createDefaultUserProfile(): UserProfile {
@@ -83,6 +294,16 @@ function createDefaultUserProfile(): UserProfile {
   };
 }
 
+/** Forces the next snapshot read to re-parse whatever is in storage now. */
+function invalidateSnapshotCaches(): void {
+  rawActivitiesString = null;
+  rawUserString = null;
+  rawChallengesString = null;
+  parsedActivitiesCache = [];
+  parsedUserCache = createDefaultUserProfile();
+  parsedChallengesCache = [];
+}
+
 /** Raw strings are the cache key; parsed values are the cached snapshots. */
 let rawActivitiesString: string | null = null;
 let parsedActivitiesCache: Activity[] = [];
@@ -98,7 +319,7 @@ export function getActivitiesSnapshot(): Activity[] {
   const currentRaw = window.localStorage.getItem(ACTIVITIES_KEY);
   if (currentRaw !== rawActivitiesString) {
     rawActivitiesString = currentRaw;
-    parsedActivitiesCache = safeParse<Activity[]>(currentRaw, []);
+    parsedActivitiesCache = parseActivities(currentRaw);
   }
   return parsedActivitiesCache;
 }
@@ -108,7 +329,7 @@ export function getUserSnapshot(): UserProfile {
   const currentRaw = window.localStorage.getItem(USER_KEY);
   if (currentRaw !== rawUserString) {
     rawUserString = currentRaw;
-    parsedUserCache = safeParse<UserProfile>(currentRaw, parsedUserCache);
+    parsedUserCache = parseUserProfile(currentRaw, parsedUserCache);
   }
   return parsedUserCache;
 }
@@ -118,7 +339,7 @@ export function getChallengesSnapshot(): Challenge[] {
   const currentRaw = window.localStorage.getItem(CHALLENGES_KEY);
   if (currentRaw !== rawChallengesString) {
     rawChallengesString = currentRaw;
-    parsedChallengesCache = safeParse<Challenge[]>(currentRaw, []);
+    parsedChallengesCache = parseChallenges(currentRaw);
   }
   return parsedChallengesCache;
 }
@@ -130,7 +351,7 @@ export function getChallengesSnapshot(): Challenge[] {
 export function updateActivities(updater: (prev: Activity[]) => Activity[]): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    const prev = safeParse<Activity[]>(window.localStorage.getItem(ACTIVITIES_KEY), []);
+    const prev = parseActivities(window.localStorage.getItem(ACTIVITIES_KEY));
     const next = updater(prev);
     window.localStorage.setItem(ACTIVITIES_KEY, JSON.stringify(next));
     broadcastLocalChange();
@@ -145,7 +366,7 @@ export function updateActivities(updater: (prev: Activity[]) => Activity[]): boo
 export function updateUser(updater: (prev: UserProfile) => UserProfile): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    const prev = safeParse<UserProfile>(window.localStorage.getItem(USER_KEY), parsedUserCache);
+    const prev = parseUserProfile(window.localStorage.getItem(USER_KEY), parsedUserCache);
     const next = updater(prev);
     window.localStorage.setItem(USER_KEY, JSON.stringify(next));
     broadcastLocalChange();
@@ -160,7 +381,7 @@ export function updateUser(updater: (prev: UserProfile) => UserProfile): boolean
 export function updateChallenges(updater: (prev: Challenge[]) => Challenge[]): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    const prev = safeParse<Challenge[]>(window.localStorage.getItem(CHALLENGES_KEY), []);
+    const prev = parseChallenges(window.localStorage.getItem(CHALLENGES_KEY));
     const next = updater(prev);
     window.localStorage.setItem(CHALLENGES_KEY, JSON.stringify(next));
     broadcastLocalChange();
@@ -190,6 +411,11 @@ export function generateSafeId(prefix: string = 'id'): string {
 /** Clears every persisted key and reseeds the demo dataset. */
 export function resetDemoData(): void {
   if (typeof window === 'undefined') return;
+
+  // Invalidate before reseeding: the cached raw strings still describe the data
+  // being wiped, and a snapshot getter must never hand them back.
+  invalidateSnapshotCaches();
+
   try {
     window.localStorage.removeItem(SEEDED_KEY);
     window.localStorage.removeItem(ACTIVITIES_KEY);
@@ -240,12 +466,12 @@ export function initializeSeedData(): void {
         kudos: [
           {
             userId: 'user-02',
-            username: 'Elena Rostova',
+            username: 'elena_rides',
             timestamp: new Date(now - 2 * ONE_HOUR).toISOString(),
           },
           {
             userId: 'user-03',
-            username: 'Marcus Vance',
+            username: 'vance_swims',
             timestamp: new Date(now - 1 * ONE_HOUR).toISOString(),
           },
         ],
@@ -278,7 +504,7 @@ export function initializeSeedData(): void {
         kudos: [
           {
             userId: CURRENT_USER_ID,
-            username: 'Alex Reynolds',
+            username: 'marathoner_alex',
             timestamp: new Date(now - 16 * ONE_HOUR).toISOString(),
           },
         ],
@@ -320,7 +546,7 @@ export function initializeSeedData(): void {
         kudos: [
           {
             userId: 'user-02',
-            username: 'Elena Rostova',
+            username: 'elena_rides',
             timestamp: new Date(now - 2 * ONE_DAY + ONE_HOUR).toISOString(),
           },
         ],

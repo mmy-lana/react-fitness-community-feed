@@ -248,13 +248,14 @@ async function runModuleSuite(browser, baseUrl) {
   await page.goto(baseUrl, { waitUntil: 'networkidle2' });
 
   const result = await page.evaluate(async () => {
-    const [telemetry, formatters, routes, dates, athletes, store] = await Promise.all([
+    const [telemetry, formatters, routes, dates, athletes, store, social] = await Promise.all([
       import('/src/utils/telemetryMath.ts'),
       import('/src/utils/formatters.ts'),
       import('/src/utils/routeGenerator.ts'),
       import('/src/utils/dateHelpers.ts'),
       import('/src/utils/seedAthletes.ts'),
       import('/src/services/storageStore.ts'),
+      import('/src/hooks/useSocial.ts'),
     ]);
 
     const out = {};
@@ -406,6 +407,82 @@ async function runModuleSuite(browser, baseUrl) {
       return acc;
     }, {});
 
+    /* --- MATH-01: antipodal and near-antipodal points ---------------------- */
+    out.antipodal = telemetry.haversineMeters(0, 0, 0, 180);
+    out.nearAntipodal = telemetry.haversineMeters(0, 0, 0, 179.9999999);
+    out.poleToPole = telemetry.haversineMeters(-90, 0, 90, 0);
+    out.antipodalFinite = [out.antipodal, out.nearAntipodal, out.poleToPole].every(
+      (v) => Number.isFinite(v) && v > 0
+    );
+    out.nearAntipodalDistance = telemetry.deriveElevationProfile([
+      { latitude: 0, longitude: 0, elevationMeters: 0, timestampOffsetSeconds: 0 },
+      { latitude: 0, longitude: 179.9999999, elevationMeters: 0, timestampOffsetSeconds: 1 },
+    ])[1].distanceMeters;
+
+    /* --- MATH-02: unmapped sport ------------------------------------------ */
+    out.caloriesUnmappedSport = telemetry.calculateCalories(3600, 'quidditch');
+
+    /* --- DATA-01: shape validation ---------------------------------------- */
+    out.sanitizeNull = store.sanitizeActivity(null);
+    out.sanitizeGarbage = store.sanitizeActivity({ title: 'no id' });
+    const repaired = store.sanitizeActivity({
+      id: 'act-repair',
+      userId: 'athlete-me-01',
+      title: 'Repaired',
+      sportType: 'teleport',
+      distanceMeters: 'far',
+      durationSeconds: null,
+      coordinates: [{ latitude: 999, longitude: 0 }, { latitude: 10, longitude: 10 }, 'nope'],
+      kudos: [{ username: 'no id' }, { userId: 'u1', username: 'u' }],
+      comments: [{ id: 'c1', content: '   ' }, { id: 'c2', content: 'keep me' }],
+      privacy: 'nonsense',
+      startTime: 'not-a-date',
+    });
+    out.repaired = repaired;
+    out.sanitizeChallengeGarbage = store.sanitizeChallenge({ title: 'no id' });
+    out.sanitizeChallengeNoSports = store.sanitizeChallenge({ id: 'ch', sportTypes: ['quidditch'] });
+    out.sanitizeProfileGarbage = store.sanitizeUserProfile('nope', { id: 'fallback-id' });
+
+    // Structurally wrong but syntactically valid payloads must not reach React.
+    const wrongShapes = [
+      '{"not":"an array"}',
+      '"a bare string"',
+      '[null, 42, {"noId":true}, {"id":"act-ok","sportType":"ride"}]',
+      '[[[[[]]]]]',
+      'null',
+    ];
+    out.wrongShapes = wrongShapes.map((raw) => {
+      window.localStorage.setItem('fitness:activities', raw);
+      return store.getActivitiesSnapshot().length;
+    });
+    window.localStorage.setItem('fitness:challenges', '{"not":"an array"}');
+    out.wrongShapeChallenges = store.getChallengesSnapshot().length;
+    window.localStorage.setItem('fitness:user', '["array","not","object"]');
+    out.wrongShapeUser = store.getUserSnapshot().fullName;
+    store.resetDemoData();
+
+    /* --- DATA-04: reset clears cached snapshots ---------------------------- */
+    store.getActivitiesSnapshot();
+    store.getChallengesSnapshot();
+    store.resetDemoData();
+    const afterResetA = store.getActivitiesSnapshot();
+    out.resetIsFresh = afterResetA.length === 5 && afterResetA[0].id === store.getActivitiesSnapshot()[0].id;
+
+    /* --- SEC-01: kudos carries the username, not the display name ---------- */
+    const target = store.getActivitiesSnapshot()[0];
+    social.toggleKudos(target.id);
+    const myKudos = store
+      .getActivitiesSnapshot()
+      .flatMap((a) => a.kudos)
+      .filter((k) => k.userId === 'athlete-me-01');
+    out.kudosUsername = myKudos[myKudos.length - 1]?.username ?? null;
+    out.seedKudosUsernames = store
+      .getActivitiesSnapshot()
+      .flatMap((a) => a.kudos)
+      .map((k) => k.username);
+    social.toggleKudos(target.id);
+    store.resetDemoData();
+
     // Cross-tab contract: a foreign storage event must not notify subscribers.
     let notified = 0;
     const unsubscribe = store.subscribeToStore(() => {
@@ -509,6 +586,73 @@ async function runModuleSuite(browser, baseUrl) {
   check('seeded calories match the estimator', result.recomputedCaloriesMatch);
   equal('seed data covers all three privacy levels', result.privacyDistribution, { public: 3, followers: 1, private: 1 });
   check('foreign storage events are ignored', result.notifiedByForeign === 0, `${result.notifiedByForeign} notifications`);
+
+  /* --- remediation regression assertions ---------------------------------- */
+  check(
+    'antipodal coordinates stay finite',
+    result.antipodalFinite && Math.abs(result.antipodal - 20015086) < 5000,
+    `antipodal ${result.antipodal}`
+  );
+  check(
+    'a near-antipodal point does not produce NaN',
+    Number.isFinite(result.nearAntipodalDistance) && result.nearAntipodalDistance > 0,
+    `${result.nearAntipodalDistance}`
+  );
+  check(
+    'an unmapped sport falls back to a default MET',
+    result.caloriesUnmappedSport === 360,
+    `${result.caloriesUnmappedSport} kcal`
+  );
+  check('a null record is rejected', result.sanitizeNull === null);
+  check('a record without an id is rejected', result.sanitizeGarbage === null);
+  check('a challenge without an id is rejected', result.sanitizeChallengeGarbage === null);
+  check(
+    'a challenge with no known sport still has one',
+    result.sanitizeChallengeNoSports?.sportTypes?.length === 1,
+    JSON.stringify(result.sanitizeChallengeNoSports?.sportTypes)
+  );
+  check('a malformed profile falls back', result.sanitizeProfileGarbage?.id === 'fallback-id', JSON.stringify(result.sanitizeProfileGarbage));
+  check(
+    'non-numeric metrics are coerced to zero',
+    result.repaired?.distanceMeters === 0 && result.repaired?.durationSeconds === 0,
+    JSON.stringify({ d: result.repaired?.distanceMeters, t: result.repaired?.durationSeconds })
+  );
+  check(
+    'out-of-range coordinates are dropped and missing arrays are initialised',
+    result.repaired?.coordinates.length === 1 && result.repaired.coordinates[0].latitude === 10,
+    JSON.stringify(result.repaired?.coordinates)
+  );
+  check(
+    'kudos and comments are sanitized',
+    result.repaired?.kudos.length === 1 && result.repaired.comments.length === 1,
+    JSON.stringify({ k: result.repaired?.kudos.length, c: result.repaired?.comments.length })
+  );
+  check(
+    'unknown enums fall back to safe values',
+    result.repaired?.sportType === 'run' && result.repaired?.privacy === 'public',
+    JSON.stringify({ s: result.repaired?.sportType, p: result.repaired?.privacy })
+  );
+  check(
+    'an invalid timestamp falls back to now',
+    typeof result.repaired?.startTime === 'string' && !Number.isNaN(new Date(result.repaired.startTime).getTime()),
+    String(result.repaired?.startTime)
+  );
+  // Only the one payload containing a record with a usable id survives; the rest
+  // degrade to an empty feed instead of throwing inside a render.
+  equal(
+    'structurally wrong payloads keep only the repairable records',
+    result.wrongShapes,
+    [0, 0, 1, 0, 0]
+  );
+  check('structurally wrong challenges yield none', result.wrongShapeChallenges === 0, String(result.wrongShapeChallenges));
+  check('structurally wrong profile falls back', result.wrongShapeUser === 'Alex Reynolds', String(result.wrongShapeUser));
+  check('reset rebuilds fresh snapshots', result.resetIsFresh === true);
+  check('kudos stores the username, not the display name', result.kudosUsername === 'marathoner_alex', String(result.kudosUsername));
+  check(
+    'seed kudos use usernames',
+    result.seedKudosUsernames.every((u) => u === u.toLowerCase().replace(/\s/g, '_')),
+    JSON.stringify(result.seedKudosUsernames)
+  );
   check('own-namespace storage events notify subscribers', result.notifiedByOwn > 0, `${result.notifiedByOwn} notifications`);
 
   await page.close();
