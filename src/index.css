@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --color-strava-orange: #FC4C02;
+  --color-strava-orange-hover: #E34402;
+  --color-surface-900: #121214;
+  --color-surface-800: #1A1A1E;
+  --color-surface-700: #24242A;
+  --color-surface-600: #2E2E36;
+  --color-ink-primary: #F4F4F6;
+  --color-ink-secondary: #A1A1AA;
+  --color-ink-tertiary: #71717A;
+  --color-sport-run: #FC4C02;
+  --color-sport-ride: #00A3FF;
+  --color-sport-swim: #00E5FF;
+  --color-sport-hike: #10B981;
+  --color-sport-workout: #A855F7;
+  --breakpoint-xs: 390px;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    background-color: var(--color-surface-900);
+    color: var(--color-ink-primary);
+    min-height: 100dvh;
+    margin: 0;
+  }
+}
