@@ -1,24 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { ActivityFilterCriteria, SportType } from './types/fitness';
-import { ActivityCard } from './components/feed/ActivityCard';
+import { useState } from 'react';
+import type { ActivityFilterCriteria } from './types/fitness';
+import { ActivityFeed } from './components/feed/ActivityFeed';
+import { FilterBar } from './components/feed/FilterBar';
 import { ManualActivityModal } from './components/forms/ManualActivityModal';
+import { AppShell } from './components/layout/AppShell';
+import { DESKTOP_QUERY } from './components/layout/Header';
+import type { BottomNavItem } from './components/layout/BottomNav';
 import { AthleteProfileCard } from './components/sidebar/AthleteProfileCard';
 import { ChallengeCard } from './components/sidebar/ChallengeCard';
+import { CommunityCard } from './components/sidebar/CommunityCard';
 import { WeeklyGoalProgress } from './components/sidebar/WeeklyGoalProgress';
-import { AlertIcon, PlusIcon, RotateCcwIcon, SearchIcon } from './components/icons/ActionIcons';
+import { AlertIcon, RotateCcwIcon } from './components/icons/ActionIcons';
 import { Button } from './components/ui/Button';
 import { useActivities } from './hooks/useActivities';
 import { useChallenges } from './hooks/useChallenges';
+import { useMediaQuery } from './hooks/useMediaQuery';
 import { addComment, deleteComment, toggleKudos } from './hooks/useSocial';
 import { useWeeklyStats } from './hooks/useWeeklyStats';
-import {
-  CURRENT_USER_ID,
-  STORAGE_ERROR_EVENT,
-  getUserSnapshot,
-  resetDemoData,
-} from './services/storageStore';
-import { getAthlete } from './utils/seedAthletes';
-import { SPORT_LABEL_MAP, SPORT_TYPES } from './utils/sportMaps';
+import { CURRENT_USER_ID, STORAGE_ERROR_EVENT, getUserSnapshot, resetDemoData } from './services/storageStore';
+import { useEffect } from 'react';
 
 const DEFAULT_FILTERS: ActivityFilterCriteria = {
   sportType: 'all',
@@ -27,19 +27,15 @@ const DEFAULT_FILTERS: ActivityFilterCriteria = {
   searchQuery: '',
 };
 
-const SORT_OPTIONS = [
-  { value: 'latest', label: 'Latest' },
-  { value: 'distance', label: 'Distance' },
-  { value: 'duration', label: 'Time' },
-  { value: 'kudos', label: 'Kudos' },
-] as const;
-
 export default function App() {
   const [filters, setFilters] = useState<ActivityFilterCriteria>(DEFAULT_FILTERS);
   const [isLogOpen, setLogOpen] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [activeNavItem, setActiveNavItem] = useState<BottomNavItem>('feed');
 
-  const { activities, addActivity, deleteActivity } = useActivities(filters);
+  const isDesktop = useMediaQuery(DESKTOP_QUERY);
+
+  const { activities, totalCount, addActivity, deleteActivity } = useActivities(filters);
   const { challenges, toggleJoin } = useChallenges();
   const weeklyStats = useWeeklyStats();
   const profile = getUserSnapshot();
@@ -54,10 +50,10 @@ export default function App() {
     return () => window.removeEventListener(STORAGE_ERROR_EVENT, onStorageError);
   }, []);
 
-  const visibleCountLabel = useMemo(
-    () => `${activities.length} ${activities.length === 1 ? 'activity' : 'activities'}`,
-    [activities.length]
-  );
+  const isFiltered =
+    filters.sportType !== 'all' ||
+    filters.dateRange !== 'all' ||
+    filters.searchQuery.trim() !== '';
 
   /** Clears a stale banner before running a mutation. */
   const runAction = (action: () => boolean): boolean => {
@@ -65,34 +61,94 @@ export default function App() {
     return action();
   };
 
-  return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-6 md:px-6">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold text-ink-primary">Activity feed</h1>
+  const handleReset = () => {
+    setStorageError(null);
+    setFilters(DEFAULT_FILTERS);
+    resetDemoData();
+  };
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            aria-label="Reset demo data"
-            onClick={() => {
-              setStorageError(null);
-              resetDemoData();
-            }}
-            iconLeft={<RotateCcwIcon className="w-4 h-4" />}
-          >
-            Reset
-          </Button>
-          <Button
-            variant="primary"
-            aria-label="Log activity"
-            onClick={() => setLogOpen(true)}
-            iconLeft={<PlusIcon className="w-4 h-4" />}
-          >
-            Log Activity
-          </Button>
-        </div>
+  const athlete = {
+    fullName: profile.fullName,
+    username: profile.username,
+    avatarInitials: profile.avatarInitials,
+    location: profile.location,
+  };
+
+  const feedColumn = (
+    <div className="flex min-w-0 flex-col gap-4">
+      <header className="flex items-baseline justify-between gap-3">
+        <h1 className="text-xl font-bold tracking-tight text-ink-primary">Activity feed</h1>
+        <span className="text-xs text-ink-tertiary">
+          Week of {new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+        </span>
+      </header>
+
+      <FilterBar
+        filters={filters}
+        onChange={setFilters}
+        visibleCount={activities.length}
+        totalCount={totalCount}
+      />
+
+      <ActivityFeed
+        activities={activities}
+        currentUserId={CURRENT_USER_ID}
+        isFiltered={isFiltered}
+        onClearFilters={() => setFilters(DEFAULT_FILTERS)}
+        onOpenLog={() => setLogOpen(true)}
+        onToggleKudos={(activityId) => runAction(() => toggleKudos(activityId))}
+        onDelete={(activityId) => runAction(() => deleteActivity(activityId))}
+        onSubmitComment={(activityId, content) => runAction(() => addComment(activityId, content))}
+        onDeleteComment={(activityId, commentId) => runAction(() => deleteComment(activityId, commentId))}
+      />
+    </div>
+  );
+
+  const progressColumn = (
+    <div className="flex flex-col gap-4" data-nav-target="weekly">
+      <div className="scroll-mt-20">
+        <AthleteProfileCard profile={profile} />
       </div>
+      <WeeklyGoalProgress stats={weeklyStats} sport={profile.weeklyGoalSport} />
+    </div>
+  );
 
+  const resetButton = (
+    <Button
+      variant="ghost"
+      fullWidth
+      aria-label="Reset demo data"
+      onClick={handleReset}
+      iconLeft={<RotateCcwIcon className="w-4 h-4" />}
+    >
+      Reset demo data
+    </Button>
+  );
+
+  const challengeColumn = (
+    <>
+      {challenges.map((challenge) => (
+        <ChallengeCard
+          key={challenge.id}
+          challenge={challenge}
+          currentProgress={challenge.currentProgress}
+          progressPercentage={challenge.progressPercentage}
+          onToggleJoin={toggleJoin}
+        />
+      ))}
+      <CommunityCard />
+    </>
+  );
+
+  return (
+    <AppShell
+      athlete={athlete}
+      searchQuery={filters.searchQuery}
+      onSearchChange={(searchQuery) => setFilters((previous) => ({ ...previous, searchQuery }))}
+      onOpenLog={() => setLogOpen(true)}
+      activeNavItem={activeNavItem}
+      onNavigate={setActiveNavItem}
+    >
       {storageError ? (
         <p
           role="alert"
@@ -103,95 +159,15 @@ export default function App() {
         </p>
       ) : null}
 
-      <div className="mb-4 flex flex-col gap-3">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <div className="relative flex min-w-0 flex-1 items-center">
-            <SearchIcon className="pointer-events-none absolute left-3 w-4 h-4 text-ink-tertiary" />
-            <input
-              type="search"
-              value={filters.searchQuery}
-              onChange={(event) => {
-                // Read the value now: the updater runs during the next render,
-                // by which time React has already cleared `currentTarget`.
-                const { value } = event.currentTarget;
-                setFilters((previous) => ({ ...previous, searchQuery: value }));
-              }}
-              aria-label="Search activities"
-              placeholder="Search activities…"
-              data-testid="feed-search"
-              className="min-h-11 w-full rounded-lg border border-surface-600 bg-surface-800 pl-10 pr-3 text-base text-ink-primary placeholder:text-ink-tertiary focus:border-strava-orange/70 focus:outline-2 focus:outline-offset-0 focus:outline-strava-orange/70"
-            />
-          </div>
+      <div className="grid gap-6 md:grid-cols-[minmax(0,1.62fr)_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_300px] xl:items-start">
+        {isDesktop ? <aside className="flex min-w-0 flex-col gap-4">{progressColumn}{resetButton}</aside> : null}
 
-          <div className="flex flex-wrap items-center gap-2">
-            {SORT_OPTIONS.map((sort) => (
-              <Button
-                key={sort.value}
-                size="sm"
-                variant={filters.sortBy === sort.value ? 'primary' : 'secondary'}
-                aria-label={`Sort by ${sort.value}`}
-                onClick={() => setFilters((previous) => ({ ...previous, sortBy: sort.value }))}
-              >
-                {sort.label}
-              </Button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            variant={filters.sportType === 'all' ? 'primary' : 'secondary'}
-            aria-label="Filter by All"
-            onClick={() => setFilters((previous) => ({ ...previous, sportType: 'all' }))}
-          >
-            All
-          </Button>
-          {SPORT_TYPES.map((sport: SportType) => (
-            <Button
-              key={sport}
-              size="sm"
-              variant={filters.sportType === sport ? 'primary' : 'secondary'}
-              aria-label={`Filter by ${SPORT_LABEL_MAP[sport]}`}
-              onClick={() => setFilters((previous) => ({ ...previous, sportType: sport }))}
-            >
-              {SPORT_LABEL_MAP[sport]}
-            </Button>
-          ))}
-          <span className="ml-auto text-xs text-ink-tertiary">{visibleCountLabel}</span>
-        </div>
-      </div>
-
-      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="flex min-w-0 flex-col gap-4">
-          {activities.map((activity) => (
-            <ActivityCard
-              key={activity.id}
-              activity={activity}
-              athlete={getAthlete(activity.userId)}
-              currentUserId={CURRENT_USER_ID}
-              onToggleKudos={(activityId) => runAction(() => toggleKudos(activityId))}
-              onDelete={(activityId) => runAction(() => deleteActivity(activityId))}
-              onSubmitComment={(activityId, content) => runAction(() => addComment(activityId, content))}
-              onDeleteComment={(activityId, commentId) =>
-                runAction(() => deleteComment(activityId, commentId))
-              }
-            />
-          ))}
-        </div>
+        {feedColumn}
 
         <aside className="flex min-w-0 flex-col gap-4">
-          <AthleteProfileCard profile={profile} />
-          <WeeklyGoalProgress stats={weeklyStats} sport={profile.weeklyGoalSport} />
-          {challenges.map((challenge) => (
-            <ChallengeCard
-              key={challenge.id}
-              challenge={challenge}
-              currentProgress={challenge.currentProgress}
-              progressPercentage={challenge.progressPercentage}
-              onToggleJoin={toggleJoin}
-            />
-          ))}
+          {isDesktop ? null : progressColumn}
+          {challengeColumn}
+          {isDesktop ? null : resetButton}
         </aside>
       </div>
 
@@ -202,6 +178,6 @@ export default function App() {
         onClose={() => setLogOpen(false)}
         onSubmit={(input) => runAction(() => addActivity(input))}
       />
-    </main>
+    </AppShell>
   );
 }
