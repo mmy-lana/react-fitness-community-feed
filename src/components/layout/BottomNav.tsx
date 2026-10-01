@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { HomeIcon, PlusIcon, TrophyIcon, UsersIcon } from '../icons/ActionIcons';
 
 export interface BottomNavProps {
@@ -27,8 +27,15 @@ const ITEM_CLASSES =
  * home indicator never covers a tab.
  */
 export function BottomNav({ onOpenLog, activeItem, onNavigate }: BottomNavProps) {
+  const isFirstMount = useRef(true);
+
   useEffect(() => {
-    // Tapping a destination scrolls its section under the sticky header.
+    // Scrolling on mount would yank the page away from the top on every load;
+    // only a real navigation should move the viewport.
+    if (isFirstMount.current) {
+      isFirstMount.current = false;
+      return;
+    }
     const target = document.querySelector(`[data-nav-target="${activeItem}"]`);
     target?.scrollIntoView({ block: 'start' });
   }, [activeItem]);

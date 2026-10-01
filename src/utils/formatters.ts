@@ -78,6 +78,29 @@ export function calculatePaceOrSpeed(
 
 const RELATIVE_TIME_FORMAT = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
 
+/**
+ * Zero-width, separator and bidirectional-mark characters: they render as
+ * nothing yet still reorder or hide the text around them, which is how
+ * "trojan source" attacks work — a title that reads one way and copies out
+ * another.
+ */
+const INVISIBLE_MARKERS =
+  /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+
+/** C0 and C1 controls, minus the whitespace a comment is allowed to keep. */
+// eslint-disable-next-line no-control-regex -- matching control characters is the entire purpose
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+
+/**
+ * Strips invisible and bidirectional control characters.
+ *
+ * Newlines and tabs survive: they are control characters too and prose needs
+ * them. Everything else in the C0, C1 and bidirectional ranges is removed.
+ */
+export function stripInvisibleCharacters(value: string): string {
+  return value.replace(CONTROL_CHARACTERS, '').replace(INVISIBLE_MARKERS, '').trim();
+}
+
 /** Two-letter monogram for avatars: "Alex Reynolds" becomes "AR". */
 export function initialsFromName(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);

@@ -58,6 +58,8 @@ export function Modal({
 }: ModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const isScrollLockedRef = useRef(false);
+  /** Element the pointer pressed on, used to tell a backdrop tap from a drag. */
+  const pressTargetRef = useRef<EventTarget | null>(null);
   const titleId = useId();
   const descriptionId = useId();
 
@@ -82,9 +84,18 @@ export function Modal({
     };
   }, [isOpen]);
 
-  const handleBackdropClick = (event: MouseEvent<HTMLDialogElement>) => {
-    // The backdrop reports the dialog element itself as the click target.
-    if (closeOnBackdrop && event.target === dialogRef.current) {
+  const handleBackdropMouseDown = (event: MouseEvent<HTMLDialogElement>) => {
+    // Remember where the press began. A click target alone is not enough:
+    // selecting text inside the dialog and releasing the pointer over the
+    // backdrop produces a click whose target is the dialog itself, which would
+    // otherwise close the dialog mid-selection.
+    pressTargetRef.current = event.target;
+  };
+
+  const handleDialogClick = (event: MouseEvent<HTMLDialogElement>) => {
+    const pressedOnBackdrop = pressTargetRef.current === dialogRef.current;
+    pressTargetRef.current = null;
+    if (closeOnBackdrop && pressedOnBackdrop && event.target === dialogRef.current) {
       onClose();
     }
   };
@@ -93,7 +104,8 @@ export function Modal({
     <dialog
       ref={dialogRef}
       onClose={onClose}
-      onClick={handleBackdropClick}
+      onMouseDown={handleBackdropMouseDown}
+      onClick={handleDialogClick}
       aria-labelledby={titleId}
       aria-describedby={description ? descriptionId : undefined}
       className={[

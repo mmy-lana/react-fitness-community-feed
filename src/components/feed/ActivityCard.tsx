@@ -43,8 +43,9 @@ export function ActivityCard({
   const elevationProfile = deriveElevationProfile(activity.coordinates);
   const canComment = typeof onSubmitComment === 'function';
 
-  const handleSubmitComment = (content: string) => {
-    onSubmitComment?.(activity.id, content);
+  // The composer keeps the athlete's text when this reports a failed write.
+  const handleSubmitComment = (content: string): boolean => {
+    return onSubmitComment?.(activity.id, content) ?? true;
   };
 
   const handleDeleteComment = (commentId: string) => {

@@ -240,6 +240,17 @@ function pageOps(page) {
   };
 }
 
+/** Presses and releases on the dialog itself, the way a backdrop tap arrives. */
+async function tapBackdrop(page) {
+  await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[open]');
+    if (!dialog) return;
+    dialog.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    dialog.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
 /* ----------------------------------------------------------- module suite */
 
 async function runModuleSuite(browser, baseUrl) {
@@ -1106,20 +1117,56 @@ async function runInteractionSuite(browser, baseUrl) {
     (await ui.attr('[data-testid="comment-button"]', 'data-comment-count')) === '2'
   );
 
+  // DATA-02: the first tap must not destroy anything.
   await ui.click('[data-testid="comment-delete"]');
+  await new Promise((r) => setTimeout(r, 200));
+  const afterFirstDeleteTap = (await readStorage()).activities.flatMap((a) => a.comments);
+  check(
+    'the first delete tap only asks for confirmation',
+    afterFirstDeleteTap.length === 2 && (await ui.count('[data-testid="comment-delete-confirm-row"]')) === 1,
+    `${afterFirstDeleteTap.length} comments`
+  );
+
+  await ui.click('[data-testid="comment-delete-cancel"]');
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    'cancelling a delete keeps the comment',
+    (await readStorage()).activities.flatMap((a) => a.comments).length === 2 &&
+      (await ui.count('[data-testid="comment-delete-confirm-row"]')) === 0
+  );
+
+  await ui.click('[data-testid="comment-delete"]');
+  await new Promise((r) => setTimeout(r, 150));
+  await ui.click('[data-testid="comment-delete-confirm"]');
   await new Promise((r) => setTimeout(r, 250));
   const afterDeleteComment = (await readStorage()).activities.flatMap((a) => a.comments);
-  check('only your own comment can be deleted', afterDeleteComment.length === 1 && afterDeleteComment[0].userId !== 'athlete-me-01', JSON.stringify(afterDeleteComment.map((c) => c.userId)));
+  check(
+    'only your own comment can be deleted',
+    afterDeleteComment.length === 1 && afterDeleteComment[0].userId !== 'athlete-me-01',
+    JSON.stringify(afterDeleteComment.map((c) => c.userId))
+  );
 
   check(
     'an open dialog locks page scrolling',
     await page.evaluate(() => document.documentElement.classList.contains('overflow-hidden'))
   );
 
+  // UI-01: a text selection that begins inside the dialog and ends on the
+  // backdrop fires a click whose target is the dialog. It must not dismiss.
   await page.evaluate(() => {
     const dialog = document.querySelector('dialog[open]');
+    const heading = dialog?.querySelector('h2');
+    heading?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    dialog?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     dialog?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    'selecting text and releasing on the backdrop keeps the dialog open',
+    await page.evaluate(() => Boolean(document.querySelector('dialog[open]')))
+  );
+
+  await tapBackdrop(page);
   await new Promise((r) => setTimeout(r, 250));
   check('backdrop click closes the dialog', await page.evaluate(() => !document.querySelector('dialog[open]')));
   check(
@@ -1176,6 +1223,23 @@ async function runInteractionSuite(browser, baseUrl) {
 
   /* --- delete ---------------------------------------------------------- */
   await ui.click('[aria-label="Delete activity"]');
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    'the first activity delete tap only asks for confirmation',
+    (await readStorage()).activities.length === 6 && (await ui.count('[data-testid="activity-delete-confirm-row"]')) === 1,
+    `${(await readStorage()).activities.length} activities`
+  );
+
+  await ui.click('[data-testid="activity-delete-cancel"]');
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    'cancelling an activity delete keeps it',
+    (await readStorage()).activities.length === 6 && (await ui.count('[data-testid="activity-delete-confirm-row"]')) === 0
+  );
+
+  await ui.click('[aria-label="Delete activity"]');
+  await new Promise((r) => setTimeout(r, 150));
+  await ui.click('[data-testid="activity-delete-confirm"]');
   await new Promise((r) => setTimeout(r, 300));
   check('activity can be deleted', (await readStorage()).activities.length === 5);
 
