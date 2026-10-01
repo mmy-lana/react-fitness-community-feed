@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import type { ActivityComment } from '../../types/fitness';
 import { formatRelativeTime, initialsFromName } from '../../utils/formatters';
 import { Avatar } from '../ui/Avatar';
@@ -26,6 +26,7 @@ export function CommentThread({
   maxLength = 300,
 }: CommentThreadProps) {
   const [draft, setDraft] = useState('');
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const trimmed = draft.trim();
   const remaining = maxLength - draft.length;
 
@@ -34,6 +35,9 @@ export function CommentThread({
     if (!trimmed) return;
     onSubmit(trimmed);
     setDraft('');
+    // Posting empties the draft and disables the submit button, which would
+    // otherwise drop focus to <body> and strand keyboard and screen reader users.
+    composerRef.current?.focus();
   };
 
   return (
@@ -96,6 +100,7 @@ export function CommentThread({
           </label>
           <textarea
             id="comment-draft"
+            ref={composerRef}
             data-testid="comment-input"
             value={draft}
             onChange={(event) => setDraft(event.currentTarget.value.slice(0, maxLength))}
