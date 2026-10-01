@@ -33,7 +33,7 @@ const args = process.argv.slice(2);
 const suiteArg = args.find((a) => a.startsWith('--suite='))?.slice('--suite='.length);
 const urlArg = args.find((a) => a.startsWith('--url='))?.slice('--url='.length);
 
-const ALL_SUITES = ['modules', 'primitives', 'ui', 'responsive', 'interactions'];
+const ALL_SUITES = ['modules', 'ui', 'responsive', 'interactions'];
 const suites = suiteArg ? suiteArg.split(',') : ALL_SUITES;
 
 /** Viewport matrix from the plan's acceptance criteria. */
@@ -498,255 +498,6 @@ function track0Points() {
   return Math.min(120, Math.max(30, Math.round(10000 / 150)));
 }
 
-/* ---------------------------------------------------------- primitives suite */
-
-/**
- * Design-system phase: the primitives are the only surface the app exposes,
- * so this suite asserts their contract — 44px targets, accessible names,
- * validation wiring and native dialog behaviour.
- */
-async function runPrimitivesSuite(browser, baseUrl) {
-  console.log('\n▸ primitives (production build)');
-  const page = await newPage(browser, { width: 390, height: 844 });
-  const ui = pageOps(page);
-  await page.goto(baseUrl, { waitUntil: 'networkidle2' });
-
-  const overview = await page.evaluate(() => {
-    const buttons = [...document.querySelectorAll('button')];
-    const labels = [...document.querySelectorAll('label')];
-    return {
-      buttons: buttons.length,
-      unlabelled: buttons.filter(
-        (b) => !b.textContent?.trim() && !b.getAttribute('aria-label') && !b.getAttribute('title')
-      ).length,
-      undersized: buttons
-        .map((b) => {
-          const r = b.getBoundingClientRect();
-          return {
-            label: (b.getAttribute('aria-label') ?? b.textContent ?? '').trim().slice(0, 20),
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-          };
-        })
-        .filter((b) => b.w > 0 && b.h > 0 && (b.h < 44 || b.w < 44)),
-      labels: labels.length,
-      inputsWithoutLabel: [...document.querySelectorAll('input, select')].filter(
-        (el) => !document.querySelector(`label[for="${el.id}"]`)
-      ).length,
-      h1: document.querySelectorAll('h1').length,
-      sportBadges: document.querySelectorAll('[class*="border-sport-"]').length,
-    };
-  });
-
-  check('every control has a button role', overview.buttons > 0, `${overview.buttons} buttons`);
-  check('every button has an accessible name', overview.unlabelled === 0, `${overview.unlabelled} unlabelled`);
-  check(
-    'every button is at least 44px in both axes',
-    overview.undersized.length === 0,
-    JSON.stringify(overview.undersized)
-  );
-  check('every field is tied to a visible label', overview.inputsWithoutLabel === 0, `${overview.inputsWithoutLabel} orphaned`);
-  check('labels are rendered', overview.labels >= 6, `${overview.labels} labels`);
-  check('shell exposes one h1', overview.h1 === 1, `${overview.h1}`);
-
-  /* --- theme tokens and contrast ---------------------------------------- */
-  const theme = await page.evaluate(() => {
-    const parse = (value) => {
-      const parts = String(value).match(/[\d.]+/g)?.map(Number) ?? [];
-      return parts.slice(0, 3);
-    };
-    const luminance = ([r, g, b]) => {
-      const channel = (v) => {
-        const c = v / 255;
-        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-      };
-      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-    };
-    const contrast = (fg, bg) => {
-      const [hi, lo] = [luminance(fg), luminance(bg)].sort((a, b) => b - a);
-      return (hi + 0.05) / (lo + 0.05);
-    };
-
-    const probe = document.createElement('div');
-    probe.style.color = 'rgb(18,18,20)';
-    document.body.appendChild(probe);
-    const pageBg = parse(getComputedStyle(document.body).backgroundColor);
-    probe.remove();
-
-    const themeSample = (selector) => {
-      const el = document.querySelector(selector);
-      if (!el) return null;
-      const style = getComputedStyle(el);
-      let bgEl = el;
-      // Walk up until a non-transparent background is found.
-      while (bgEl && (getComputedStyle(bgEl).backgroundColor === 'rgba(0, 0, 0, 0)' || getComputedStyle(bgEl).backgroundColor === 'transparent')) {
-        bgEl = bgEl.parentElement;
-      }
-      return {
-        color: parse(style.color),
-        bg: parse(bgEl ? getComputedStyle(bgEl).backgroundColor : 'rgb(18,18,20)'),
-        fontSize: parseFloat(style.fontSize),
-      };
-    };
-
-    // Every emitted rule, so we can prove Tailwind saw the static classes.
-    let css = '';
-    for (const sheet of document.styleSheets) {
-      try {
-        for (const rule of sheet.cssRules) css += rule.cssText;
-      } catch {
-        // cross-origin sheet: nothing to inspect
-      }
-    }
-
-    return {
-      pageBg,
-      badgeBg: [...document.querySelectorAll('[data-testid="sport-badge"]')].map((el) => getComputedStyle(el).backgroundColor),
-      badgeText: [...document.querySelectorAll('[data-testid="sport-badge"]')].map((el) => getComputedStyle(el).color),
-      svgCount: document.querySelectorAll('svg').length,
-      // Icons inside a closed dialog are display:none, so they are excluded.
-      zeroSizeSvgs: [...document.querySelectorAll('svg')]
-        .filter((svg) => !svg.closest('dialog:not([open])'))
-        .filter((svg) => {
-          const r = svg.getBoundingClientRect();
-          return r.width === 0 || r.height === 0;
-        }).length,
-      cssLength: css.length,
-      hasStravaOrange: /\.bg-strava-orange(?![-\w])/.test(css),
-      hasSportText: /\.text-sport-swim(?![-\w])/.test(css),
-      hasSportBorder: /\.border-sport-run\\\/30(?![-\w])/.test(css),
-      hasSurface: /\.bg-surface-700(?![-\w])/.test(css),
-      hasXsBreakpoint: /@media\s*\(width\s*>=\s*390px\)/.test(css),
-      hasThemeVars: css.includes('--color-strava-orange'),
-      ratios: {
-        primary: contrastOf(themeSample('h1')),
-        secondary: contrastOf(themeSample('label')),
-        tertiary: contrastOf(themeSample('h2')),
-      },
-    };
-
-    function contrastOf(sample) {
-      if (!sample) return null;
-      const [hi, lo] = [luminance(sample.color), luminance(sample.bg)].sort((a, b) => b - a);
-      return Number(((hi + 0.05) / (lo + 0.05)).toFixed(2));
-    }
-  });
-
-  check('page paints the surface-900 token', theme.pageBg.join(',') === '18,18,20', theme.pageBg.join(','));
-  check('Tailwind emitted the custom color variables', theme.hasThemeVars);
-  check('Tailwind emitted bg-strava-orange', theme.hasStravaOrange);
-  check('Tailwind emitted sport text colors', theme.hasSportText);
-  check('Tailwind emitted opacity-modified sport borders', theme.hasSportBorder);
-  check('Tailwind emitted surface tokens', theme.hasSurface);
-  check('Tailwind emitted the 390px xs breakpoint', theme.hasXsBreakpoint, 'no @media (width >= 390px)');
-  check('heading contrast ≥ 7:1', theme.ratios.primary >= 7, `${theme.ratios.primary}:1`);
-  check('secondary text contrast ≥ 4.5:1', theme.ratios.secondary >= 4.5, `${theme.ratios.secondary}:1`);
-  check('tertiary text contrast ≥ 4.5:1', theme.ratios.tertiary >= 4.5, `${theme.ratios.tertiary}:1`);
-  check(
-    'each sport badge renders a distinct tint',
-    new Set(theme.badgeBg).size >= 5,
-    JSON.stringify(theme.badgeBg)
-  );
-  check(
-    'each sport badge renders a distinct accent colour',
-    new Set(theme.badgeText).size >= 5,
-    JSON.stringify(theme.badgeText)
-  );
-  check('icons render at a non-zero size', theme.zeroSizeSvgs === 0 && theme.svgCount > 0, `${theme.zeroSizeSvgs}/${theme.svgCount} empty`);
-
-  const sportLabels = await page.$$eval('[data-testid="sport-badge"]', (els) =>
-    els.map((el) => (el.textContent ?? '').trim()).filter(Boolean)
-  );
-  check(
-    'all five sports render a labelled badge',
-    ['Run', 'Ride', 'Swim', 'Hike', 'Workout'].every((label) => sportLabels.some((t) => t.includes(label))),
-    JSON.stringify(sportLabels)
-  );
-
-  const invalidField = await page.evaluate(() => {
-    const input = document.querySelector('[data-testid="preview-invalid"]');
-    const messageId = input?.getAttribute('aria-describedby');
-    return {
-      ariaInvalid: input?.getAttribute('aria-invalid'),
-      describedBy: messageId ?? null,
-      alertText: messageId ? document.getElementById(messageId)?.textContent : null,
-      alertRole: messageId ? document.getElementById(messageId)?.getAttribute('role') : null,
-    };
-  });
-  check('invalid field is marked aria-invalid', invalidField.ariaInvalid === 'true', String(invalidField.ariaInvalid));
-  check('invalid field points at its message', Boolean(invalidField.describedBy));
-  check('validation message is announced', invalidField.alertRole === 'alert' && Boolean(invalidField.alertText), JSON.stringify(invalidField));
-
-  await ui.select('[data-testid="preview-sport"]', 'swim');
-  await new Promise((r) => setTimeout(r, 150));
-  const selected = await ui.prop('[data-testid="preview-sport"]', 'value');
-  check('select reflects the chosen value', selected === 'swim', String(selected));
-  const unitSwapped = await page.evaluate(() =>
-    [...document.querySelectorAll('span')].some((el) => el.textContent === 'm' && el.className.includes('pointer-events-none'))
-  );
-  check('distance unit follows the sport', unitSwapped);
-
-  await ui.clear('[data-testid="preview-title"]');
-  await new Promise((r) => setTimeout(r, 150));
-  const clearedTitle = await ui.prop('[data-testid="preview-title"]', 'value');
-  check('controlled input follows its value prop', clearedTitle === '', String(clearedTitle));
-
-  // --- dialog behaviour ---------------------------------------------------
-  await ui.click('[data-testid="noop"]').catch(() => {});
-  await page.evaluate(() => {
-    const button = [...document.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('Open modal preview')
-    );
-    button?.click();
-  });
-  await new Promise((r) => setTimeout(r, 250));
-  const opened = await page.evaluate(() => {
-    const dialog = document.querySelector('dialog[open]');
-    return {
-      open: Boolean(dialog),
-      labelled: Boolean(dialog?.getAttribute('aria-labelledby')),
-      heading: dialog?.querySelector('h2')?.textContent ?? '',
-      scrollLocked: document.documentElement.classList.contains('overflow-hidden'),
-      focusInside: Boolean(dialog?.contains(document.activeElement)),
-    };
-  });
-  check('modal opens from the shell', opened.open);
-  check('modal heading renders', opened.heading === 'Modal primitive', opened.heading);
-  check('modal is labelled for assistive tech', opened.labelled);
-  check('modal locks page scrolling', opened.scrollLocked);
-  check('modal moves focus inside', opened.focusInside);
-
-  await shot(page, 'primitives-390-modal');
-  await page.keyboard.press('Escape');
-  await new Promise((r) => setTimeout(r, 250));
-  const closed = await page.evaluate(() => ({
-    open: Boolean(document.querySelector('dialog[open]')),
-    scrollLocked: document.documentElement.classList.contains('overflow-hidden'),
-  }));
-  check('Escape closes the modal', closed.open === false);
-  check('closing the modal restores scrolling', closed.scrollLocked === false);
-
-  // Backdrop dismissal.
-  await page.evaluate(() => {
-    const button = [...document.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('Open modal preview')
-    );
-    button?.click();
-  });
-  await new Promise((r) => setTimeout(r, 250));
-  await page.evaluate(() => {
-    const dialog = document.querySelector('dialog[open]');
-    dialog?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-  });
-  await new Promise((r) => setTimeout(r, 250));
-  check('backdrop click closes the modal', await page.evaluate(() => !document.querySelector('dialog[open]')));
-  check('backdrop dismissal restores scrolling', await page.evaluate(() => !document.documentElement.classList.contains('overflow-hidden')));
-
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await shot(page, 'primitives-390');
-  await page.close();
-}
-
 /* --------------------------------------------------------------- ui suite */
 
 async function runUiSuite(browser, baseUrl) {
@@ -865,6 +616,115 @@ async function runUiSuite(browser, baseUrl) {
   check('dialogs carry a heading', a11y.dialogsWithoutName === 0, `${a11y.dialogsWithoutName} unnamed`);
   check('page exposes a single h1', a11y.h1Count === 1, `${a11y.h1Count} h1 elements`);
   check('document declares a language', a11y.lang === 'en', a11y.lang);
+
+  /* --- theme tokens and contrast ---------------------------------------- */
+  const theme = await page.evaluate(() => {
+    const parse = (value) => {
+      const parts = String(value).match(/[\d.]+/g)?.map(Number) ?? [];
+      return parts.slice(0, 3);
+    };
+    const luminance = ([r, g, b]) => {
+      const channel = (v) => {
+        const c = v / 255;
+        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    };
+    const contrast = (fg, bg) => {
+      const [hi, lo] = [luminance(fg), luminance(bg)].sort((a, b) => b - a);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+
+    const probe = document.createElement('div');
+    probe.style.color = 'rgb(18,18,20)';
+    document.body.appendChild(probe);
+    const pageBg = parse(getComputedStyle(document.body).backgroundColor);
+    probe.remove();
+
+    const themeSample = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      let bgEl = el;
+      // Walk up until a non-transparent background is found.
+      while (bgEl && (getComputedStyle(bgEl).backgroundColor === 'rgba(0, 0, 0, 0)' || getComputedStyle(bgEl).backgroundColor === 'transparent')) {
+        bgEl = bgEl.parentElement;
+      }
+      return {
+        color: parse(style.color),
+        bg: parse(bgEl ? getComputedStyle(bgEl).backgroundColor : 'rgb(18,18,20)'),
+        fontSize: parseFloat(style.fontSize),
+      };
+    };
+
+    // Every emitted rule, so we can prove Tailwind saw the static classes.
+    let css = '';
+    for (const sheet of document.styleSheets) {
+      try {
+        for (const rule of sheet.cssRules) css += rule.cssText;
+      } catch {
+        // cross-origin sheet: nothing to inspect
+      }
+    }
+
+    return {
+      pageBg,
+      badgeBg: [...document.querySelectorAll('[data-testid="sport-badge"]')].map((el) => getComputedStyle(el).backgroundColor),
+      badgeText: [...document.querySelectorAll('[data-testid="sport-badge"]')].map((el) => getComputedStyle(el).color),
+      smallTextColor: (() => {
+        const el = document.querySelector('[data-testid="activity-card"] [data-testid="activity-stats"] span');
+        return el ? getComputedStyle(el).color : null;
+      })(),
+      svgCount: document.querySelectorAll('svg').length,
+      // Icons inside a closed dialog are display:none, so they are excluded.
+      zeroSizeSvgs: [...document.querySelectorAll('svg')]
+        .filter((svg) => !svg.closest('dialog:not([open])'))
+        .filter((svg) => {
+          const r = svg.getBoundingClientRect();
+          return r.width === 0 || r.height === 0;
+        }).length,
+      cssLength: css.length,
+      hasStravaOrange: /\.bg-strava-orange(?![-\w])/.test(css),
+      hasSportText: /\.text-sport-swim(?![-\w])/.test(css),
+      hasSportBorder: /\.border-sport-run\\\/30(?![-\w])/.test(css),
+      hasSurface: /\.bg-surface-700(?![-\w])/.test(css),
+      hasXsBreakpoint: /@media\s*\(width\s*>=\s*390px\)/.test(css),
+      hasThemeVars: css.includes('--color-strava-orange'),
+      ratios: {
+        primary: contrastOf(themeSample('h1')),
+        secondary: contrastOf(themeSample('[data-testid="activity-stats"] label, label')),
+        tertiary: contrastOf(themeSample('[data-testid="weekly-goal"] p')),
+      },
+    };
+
+    function contrastOf(sample) {
+      if (!sample) return null;
+      const [hi, lo] = [luminance(sample.color), luminance(sample.bg)].sort((a, b) => b - a);
+      return Number(((hi + 0.05) / (lo + 0.05)).toFixed(2));
+    }
+  });
+
+  check('page paints the surface-900 token', theme.pageBg.join(',') === '18,18,20', theme.pageBg.join(','));
+  check('Tailwind emitted the custom color variables', theme.hasThemeVars);
+  check('Tailwind emitted bg-strava-orange', theme.hasStravaOrange);
+  check('Tailwind emitted sport text colors', theme.hasSportText);
+  check('Tailwind emitted opacity-modified sport borders', theme.hasSportBorder);
+  check('Tailwind emitted surface tokens', theme.hasSurface);
+  check('Tailwind emitted the 390px xs breakpoint', theme.hasXsBreakpoint, 'no @media (width >= 390px)');
+  check('heading contrast ≥ 7:1', theme.ratios.primary >= 7, `${theme.ratios.primary}:1`);
+  check('secondary text contrast ≥ 4.5:1', theme.ratios.secondary >= 4.5, `${theme.ratios.secondary}:1`);
+  check('tertiary text contrast ≥ 4.5:1', theme.ratios.tertiary >= 4.5, `${theme.ratios.tertiary}:1`);
+  check(
+    'each sport badge renders a distinct tint',
+    new Set(theme.badgeBg).size >= 5,
+    JSON.stringify(theme.badgeBg)
+  );
+  check(
+    'each sport badge renders a distinct accent colour',
+    new Set(theme.badgeText).size >= 5,
+    JSON.stringify(theme.badgeText)
+  );
+  check('icons render at a non-zero size', theme.zeroSizeSvgs === 0 && theme.svgCount > 0, `${theme.zeroSizeSvgs}/${theme.svgCount} empty`);
 
   await shot(page, 'ui-1440-feed');
   await page.close();
@@ -1042,12 +902,27 @@ async function runInteractionSuite(browser, baseUrl) {
   await new Promise((r) => setTimeout(r, 200));
 
   const kudosInStorage = (await readStorage()).activities.reduce((n, a) => n + a.kudos.length, 0);
-  check('kudos persist to storage', kudosInStorage === 3, `${kudosInStorage} kudos`);
+  check('kudos persist to storage', kudosInStorage === 5, `${kudosInStorage} kudos`);
 
   /* --- comments -------------------------------------------------------- */
-  await ui.click('[aria-label="Open comments"]');
+  await ui.click('[data-testid="comment-button"]');
   await new Promise((r) => setTimeout(r, 250));
   check('comment dialog opens', await page.evaluate(() => Boolean(document.querySelector('dialog[open]'))));
+
+  const focusState = await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[open]');
+    const active = document.activeElement;
+    return {
+      tag: active?.tagName ?? null,
+      inside: Boolean(dialog && active && dialog !== active && dialog.contains(active)),
+      onDialog: active === dialog,
+    };
+  });
+  check(
+    'the open dialog takes focus',
+    focusState.inside || focusState.onDialog,
+    JSON.stringify(focusState)
+  );
 
   await ui.type('[data-testid="comment-input"]', 'Strong finish on that last climb.');
   await ui.click('[data-testid="comment-submit"]');
@@ -1068,6 +943,24 @@ async function runInteractionSuite(browser, baseUrl) {
   const afterDeleteComment = (await readStorage()).activities.flatMap((a) => a.comments);
   check('only your own comment can be deleted', afterDeleteComment.length === 1 && afterDeleteComment[0].userId !== 'athlete-me-01', JSON.stringify(afterDeleteComment.map((c) => c.userId)));
 
+  check(
+    'an open dialog locks page scrolling',
+    await page.evaluate(() => document.documentElement.classList.contains('overflow-hidden'))
+  );
+
+  await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[open]');
+    dialog?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await new Promise((r) => setTimeout(r, 250));
+  check('backdrop click closes the dialog', await page.evaluate(() => !document.querySelector('dialog[open]')));
+  check(
+    'backdrop dismissal restores page scrolling',
+    await page.evaluate(() => !document.documentElement.classList.contains('overflow-hidden'))
+  );
+
+  await ui.click('[data-testid="comment-button"]');
+  await new Promise((r) => setTimeout(r, 250));
   await page.keyboard.press('Escape');
   await new Promise((r) => setTimeout(r, 250));
   check('Escape closes the dialog', await page.evaluate(() => !document.querySelector('dialog[open]')));
@@ -1170,6 +1063,149 @@ async function runInteractionSuite(browser, baseUrl) {
   check('reset restores the default challenge joins', afterReset.challenges.filter((c) => c.joined).length === 2);
   check('reset repaints the feed', (await ui.count('[data-testid="activity-card"]')) === 5);
 
+  /* --- entry form rules -------------------------------------------------- */
+  console.log('  · validation rules');
+
+  const openModal = async () => {
+    await ui.click('[aria-label="Log activity"]');
+    await new Promise((r) => setTimeout(r, 250));
+  };
+  const closeModal = async () => {
+    await page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 250));
+  };
+  const submitDisabled = () => ui.attr('[data-testid="activity-submit"]', 'disabled');
+  const firstError = () =>
+    page.evaluate(() => document.querySelector('[data-testid="activity-form"] [role="alert"]')?.textContent ?? null);
+
+  // A short title blocks submission and explains why.
+  await openModal();
+  await ui.type('[data-testid="activity-title"]', 'ab');
+  await new Promise((r) => setTimeout(r, 150));
+  check('short titles block submission', (await submitDisabled()) !== null);
+  check(
+    'the invalid field is marked aria-invalid',
+    (await ui.attr('[data-testid="activity-title"]', 'aria-invalid')) === 'true'
+  );
+  check('the offending field explains itself', (await firstError())?.includes('at least 3') === true, String(await firstError()));
+  await closeModal();
+
+  // Minutes are capped at two digits and validated against 59.
+  await openModal();
+  await ui.type('[data-testid="activity-title"]', 'Minute Overflow');
+  await ui.type('[data-testid="activity-duration-minutes"]', '99');
+  await new Promise((r) => setTimeout(r, 150));
+  check('minutes above 59 are rejected', (await submitDisabled()) !== null);
+  check('minutes error names the range', (await firstError())?.includes('0 and 59') === true, String(await firstError()));
+  await closeModal();
+
+  // A start time in the future is not a real activity yet.
+  await openModal();
+  await ui.type('[data-testid="activity-title"]', 'Tomorrow Long Run');
+  await ui.type('[data-testid="activity-duration-minutes"]', '30');
+  const tomorrow = await page.evaluate(() => {
+    const d = new Date(Date.now() + 24 * 3600 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  });
+  await ui.type('[data-testid="activity-date"]', '');
+  await page.evaluate((value) => {
+    const input = document.querySelector('[data-testid="activity-date"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, tomorrow);
+  await new Promise((r) => setTimeout(r, 200));
+  check('a future start date blocks submission', (await submitDisabled()) !== null);
+  check('the date error explains the rule', (await firstError())?.includes('future') === true, String(await firstError()));
+  await closeModal();
+
+  // Swimming is entered in meters and locks the km toggle.
+  await openModal();
+  await ui.select('[data-testid="activity-sport"]', 'swim');
+  await new Promise((r) => setTimeout(r, 150));
+  const swimUnit = await page.evaluate(() => {
+    const group = document.querySelector('[data-testid="activity-distance-unit"]');
+    return [...group.querySelectorAll('button')].map((b) => ({ label: b.textContent.trim(), disabled: b.disabled }));
+  });
+  check('swimming locks the unit toggle to meters', swimUnit.find((b) => b.label === 'km')?.disabled === true && swimUnit.find((b) => b.label === 'm')?.disabled === false, JSON.stringify(swimUnit));
+
+  await ui.type('[data-testid="activity-title"]', 'Yard Session');
+  await ui.type('[data-testid="activity-duration-minutes"]', '40');
+  await ui.type('[data-testid="activity-duration-seconds"]', '00');
+  await ui.type('[data-testid="activity-distance"]', '1800');
+  await ui.type('[data-testid="activity-elevation"]', '0');
+  await new Promise((r) => setTimeout(r, 200));
+  check('a swim form becomes valid', (await submitDisabled()) === null);
+  await ui.click('[data-testid="activity-submit"]');
+  await new Promise((r) => setTimeout(r, 300));
+  const swimActivity = (await readStorage()).activities[0];
+  check('swim distance is stored in meters', swimActivity?.distanceMeters === 1800, `${swimActivity?.distanceMeters}`);
+  check('a swim route is still generated', (swimActivity?.coordinates?.length ?? 0) > 0);
+
+  // Workouts are duration only.
+  await openModal();
+  await ui.select('[data-testid="activity-sport"]', 'workout');
+  await new Promise((r) => setTimeout(r, 150));
+  const workoutState = await page.evaluate(() => ({
+    distanceDisabled: document.querySelector('[data-testid="activity-distance"]')?.disabled,
+    elevationDisabled: document.querySelector('[data-testid="activity-elevation"]')?.disabled,
+    pattern: document.querySelector('[data-testid="activity-route-pattern"]')?.value,
+  }));
+  check('workouts disable distance and elevation', workoutState.distanceDisabled === true && workoutState.elevationDisabled === true, JSON.stringify(workoutState));
+  check('workouts force a stationary pattern', workoutState.pattern === 'stationary', String(workoutState.pattern));
+
+  await ui.type('[data-testid="activity-title"]', 'Mobility Session');
+  await ui.type('[data-testid="activity-duration-minutes"]', '25');
+  await new Promise((r) => setTimeout(r, 200));
+  check('a duration-only workout is valid', (await submitDisabled()) === null);
+  await ui.click('[data-testid="activity-submit"]');
+  await new Promise((r) => setTimeout(r, 300));
+  const workoutActivity = (await readStorage()).activities[0];
+  check('a workout stores no distance or elevation', workoutActivity?.distanceMeters === 0 && workoutActivity?.elevationGainMeters === 0, JSON.stringify({ d: workoutActivity?.distanceMeters, e: workoutActivity?.elevationGainMeters }));
+  check('a workout stores no route', (workoutActivity?.coordinates?.length ?? -1) === 0);
+
+  // A stationary run keeps its distance out of the record.
+  await openModal();
+  await ui.select('[data-testid="activity-route-pattern"]', 'stationary');
+  await ui.type('[data-testid="activity-title"]', 'Mobility Run');
+  await ui.type('[data-testid="activity-duration-minutes"]', '20');
+  await ui.type('[data-testid="activity-elevation"]', '0');
+  await new Promise((r) => setTimeout(r, 200));
+  check('a stationary run needs no distance', (await submitDisabled()) === null);
+  await ui.click('[data-testid="activity-submit"]');
+  await new Promise((r) => setTimeout(r, 300));
+  const stationary = (await readStorage()).activities[0];
+  check('a stationary activity stores no distance', stationary?.distanceMeters === 0, `${stationary?.distanceMeters}`);
+  check('a stationary activity stores no route', (stationary?.coordinates?.length ?? -1) === 0);
+
+  // Privacy round-trip: the modal closed on save, so open it again.
+  await openModal();
+  const privacy = await ui.prop('[data-testid="activity-privacy"]', 'value');
+  await ui.select('[data-testid="activity-privacy"]', 'private');
+  await ui.type('[data-testid="activity-title"]', 'Private Ride');
+  await ui.select('[data-testid="activity-sport"]', 'ride');
+  await ui.select('[data-testid="activity-route-pattern"]', 'loop');
+  await ui.type('[data-testid="activity-duration-minutes"]', '55');
+  await ui.type('[data-testid="activity-distance"]', '25');
+  await ui.type('[data-testid="activity-elevation"]', '300');
+  await new Promise((r) => setTimeout(r, 200));
+  await ui.click('[data-testid="activity-submit"]');
+  await new Promise((r) => setTimeout(r, 300));
+  const privateActivity = (await readStorage()).activities[0];
+  check('privacy default is public', privacy === 'public', String(privacy));
+  check('privacy is stored on the activity', privateActivity?.privacy === 'private', `${privateActivity?.privacy}`);
+
+  // Restore the seed so the run ends on a known state.
+  await ui.click('[aria-label="Reset demo data"]');
+  await new Promise((r) => setTimeout(r, 400));
+  const finalState = await readStorage();
+  check(
+    'demo reset still works after a busy session',
+    finalState.activities.length === 5 && finalState.challenges.length === 3,
+    `${finalState.activities.length}/${finalState.challenges.length}`
+  );
+
   await shot(page, 'interactions-390-after');
   await page.close();
 }
@@ -1192,7 +1228,6 @@ async function main() {
   const browser = await launchBrowser();
   try {
     if (suites.includes('modules')) await runModuleSuite(browser, urlArg ?? DEV_URL);
-    if (suites.includes('primitives')) await runPrimitivesSuite(browser, urlArg ?? PREVIEW_URL);
     if (suites.includes('ui')) await runUiSuite(browser, urlArg ?? PREVIEW_URL);
     if (suites.includes('responsive')) await runResponsiveSuite(browser, urlArg ?? PREVIEW_URL);
     if (suites.includes('interactions')) await runInteractionSuite(browser, urlArg ?? PREVIEW_URL);
