@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Activity, AthleteDirectoryEntry } from '../../types/fitness';
 import { formatRelativeTime } from '../../utils/formatters';
 import { AlertIcon, TrashIcon } from '../icons/ActionIcons';
@@ -23,6 +23,18 @@ export interface ActivityHeaderProps {
  */
 export function ActivityHeader({ activity, athlete, isOwner, onDelete }: ActivityHeaderProps) {
   const [isConfirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    if (!isConfirmingDelete) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const row = document.querySelector('[data-testid="activity-delete-confirm-row"]');
+      if (row && !row.contains(event.target as Node)) {
+        setConfirmingDelete(false);
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [isConfirmingDelete]);
 
   return (
     <header className="flex items-start gap-3">

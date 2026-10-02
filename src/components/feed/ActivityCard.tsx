@@ -113,6 +113,7 @@ export function ActivityCard({
           size="md"
         >
           <CommentThread
+            key={isCommentsOpen ? 'comments-open' : 'comments-closed'}
             comments={activity.comments}
             currentUserId={currentUserId}
             currentUserName={athlete.fullName}
