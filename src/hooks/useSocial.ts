@@ -4,6 +4,7 @@ import {
   getUserSnapshot,
   updateActivities,
 } from '../services/storageStore';
+import { stripInvisibleCharacters } from '../utils/formatters';
 
 /** Hard cap on a single comment so the feed stays readable. */
 export const MAX_COMMENT_LENGTH = 300;
@@ -38,8 +39,8 @@ export function toggleKudos(activityId: string): boolean {
 
 /** Appends a comment. Empty input is ignored rather than stored as a blank. */
 export function addComment(activityId: string, content: string): boolean {
-  const trimmed = content.trim();
-  if (!trimmed) return false;
+  const clean = stripInvisibleCharacters(content);
+  if (!clean) return false;
 
   const currentUser = getUserSnapshot();
 
@@ -52,7 +53,7 @@ export function addComment(activityId: string, content: string): boolean {
         activityId,
         userId: CURRENT_USER_ID,
         userName: currentUser.fullName,
-        content: trimmed.slice(0, MAX_COMMENT_LENGTH),
+        content: clean.slice(0, MAX_COMMENT_LENGTH),
         createdAt: new Date().toISOString(),
       };
 

@@ -11,6 +11,7 @@ import type {
 import { CURRENT_USER_ID } from '../utils/seedAthletes';
 import { generateSyntheticRoute } from '../utils/routeGenerator';
 import { calculateCalories } from '../utils/telemetryMath';
+import { stripInvisibleCharacters } from '../utils/formatters';
 
 export { CURRENT_USER_ID } from '../utils/seedAthletes';
 
@@ -172,13 +173,13 @@ function sanitizeComments(value: unknown): ActivityComment[] {
     if (!isRecord(entry)) continue;
     const id = readString(entry.id);
     if (!id) continue;
-    const content = readString(entry.content);
-    if (!content.trim()) continue;
+    const content = stripInvisibleCharacters(readString(entry.content));
+    if (!content) continue;
     comments.push({
       id,
       activityId: readString(entry.activityId),
       userId: readString(entry.userId),
-      userName: readString(entry.userName, 'Community Athlete'),
+      userName: stripInvisibleCharacters(readString(entry.userName, 'Community Athlete')) || 'Community Athlete',
       content,
       createdAt: readIsoDate(entry.createdAt, now),
     });
@@ -193,11 +194,12 @@ export function sanitizeActivity(value: unknown): Activity | null {
   if (!id) return null;
 
   const now = new Date().toISOString();
+  const sanitizedTitle = stripInvisibleCharacters(readString(value.title));
   return {
     id,
     userId: readString(value.userId, CURRENT_USER_ID),
-    title: readString(value.title, 'Untitled activity'),
-    description: readString(value.description),
+    title: sanitizedTitle || 'Untitled activity',
+    description: stripInvisibleCharacters(readString(value.description)),
     sportType: readSport(value.sportType),
     startTime: readIsoDate(value.startTime, now),
     durationSeconds: readNonNegative(value.durationSeconds),
