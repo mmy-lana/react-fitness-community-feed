@@ -1,52 +1,145 @@
 # Fitness Community & Activity Feed
 
-A local-first community feed for logged activities: route maps, elevation
-profiles, kudos, comments, weekly goals and challenges. No backend — the entire
-dataset lives in `localStorage` behind one reactive store.
+A local-first fitness community feed and telemetry platform built with React 19, TypeScript, and Tailwind CSS v4. Features GPS route mapping, dynamic elevation charts, social kudos, threaded comments, weekly goal gauges, and community challenges without external backend dependencies.
 
-## Stack
+- Live Demo: https://react-fitness-community-feed.vercel.app
+- Source Code: https://github.com/mmy-lana/react-fitness-community-feed
 
-- React 19 + TypeScript (strict, `verbatimModuleSyntax`, `erasableSyntaxOnly`)
-- Vite 8
-- Tailwind CSS v4 via `@tailwindcss/vite`, themed from CSS `@theme` tokens
+---
 
-## Commands
+## Key Features
 
+- Activity Feed: Chronological stream supporting five sport types (Run, Ride, Swim, Hike, Workout) with sport-specific metrics and visibility badges (Public, Followers, Only You).
+- Route Map Canvas: Pure SVG coordinate projection with longitudinal aspect ratio correction (`cos(midLat)`), start/finish pins, and expand-to-fullscreen modal view.
+- Elevation Profile Charts: SVG quadratic Bezier path generation derived dynamically from GPS coordinates via the Haversine formula, paired with non-scaling strokes and HTML elevation callouts.
+- Social Interaction: Single-action Kudos toggling and threaded commenting with author-only deletion safeguards and storage failure rollback.
+- Manual Activity Logger: Form modal supporting metric units (meters for swimming, kilometers for land sports), route pattern generation (Loop, Out & Back, Climb, Stationary via Mulberry32 PRNG), and duration/elevation validation.
+- Weekly Goal Tracker: Circular SVG ring gauge aggregating distance, active time, and elevation gain from Monday 00:00 local time against athlete targets.
+- Club Challenges: Time-windowed community goals tracking cumulative distance and elevation milestones with dynamic progress bars.
+- Mobile-First Responsive Shell: Tested on 360px, 390px, 430px, 768px, 1024px, and 1440px viewports. Features fixed bottom navigation, 44px minimum touch targets, and safe-area inset accommodation.
+
+---
+
+## Architecture & Engineering Highlights
+
+- Single Shared Reactive Store (`src/services/storageStore.ts`): Built on React's `useSyncExternalStore` with cached snapshot references to prevent re-render loops. All mutations re-read storage atomically before writing to prevent race conditions.
+- Runtime Schema Sanitization: Inbound storage payloads pass through shape validators (`sanitizeActivity`, `sanitizeUserProfile`, `sanitizeChallenge`) to drop corrupted fields and enforce non-null data contracts.
+- Defensive Telemetry Math (`src/utils/telemetryMath.ts`): Bounded trigonometric terms in `haversineMeters` prevent `NaN` evaluation on antipodal coordinates. Calorie computations utilize standardized MET lookup tables with fallback defaults.
+- Input Hardening (`src/utils/formatters.ts`): Title, description, and comment inputs strip unprintable Unicode control characters and Right-to-Left (BiDi) override exploits (`\u202A`–`\u202E`, `\u2066`–`\u206F`).
+- Native Dialog Modals (`src/components/ui/Modal.tsx`): Built on HTML5 `<dialog>` with focus trapping, backdrop click selection protection, and scroll-lock reference counters.
+- Global Error Boundary (`src/components/ui/ErrorBoundary.tsx`): Catches render-time exceptions with diagnostics, retry mechanisms, and emergency demo data reset capabilities.
+
+---
+
+## Tech Stack
+
+- Framework: React 19
+- Language: TypeScript (Strict mode, `verbatimModuleSyntax: true`, `erasableSyntaxOnly: true`)
+- Build Tool: Vite 8
+- Styling: Tailwind CSS v4 (via `@tailwindcss/vite` and CSS `@theme` tokens)
+- Package Manager: pnpm
+- Testing & Verification: Puppeteer Core with headless Chrome
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 20 or higher
+- pnpm 9 or higher
+- Google Chrome or Chromium (required for running the verification harness)
+
+### Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/mmy-lana/react-fitness-community-feed.git
+   cd react-fitness-community-feed
+   ```
+
+2. Install dependencies:
+   ```bash
+   pnpm install
+   ```
+
+### Development
+
+Start the local development server:
 ```bash
-pnpm install
-pnpm run dev       # dev server
-pnpm run build     # tsc -b && vite build
-pnpm run lint      # eslint
-pnpm run verify    # headless Chrome verification (see below)
+pnpm run dev
 ```
 
-## Verification
+### Production Build
 
-`pnpm run verify` drives the real app in headless Chrome across four suites:
+Type-check and compile the application bundle:
+```bash
+pnpm run build
+```
 
-| Suite          | Server         | Covers                                                        |
-| -------------- | -------------- | ------------------------------------------------------------- |
-| `modules`      | `vite dev`     | telemetry math, route generator, formatters, storage engine    |
-| `ui`           | `vite preview` | feed rendering, chart geometry, a11y wiring, theme and contrast |
-| `responsive`   | `vite preview` | 360 / 390 / 430 / 768 / 1024 / 1440 layouts and touch targets |
-| `interactions` | `vite preview` | kudos, comments, entry form rules, filters, nav, demo reset   |
+Preview the production build locally:
+```bash
+pnpm run preview
+```
 
-Run one suite with `pnpm run verify -- --suite=interactions`. Screenshots land in
-`.artifacts/` (gitignored). The harness uses the system Chrome; override with
-`CHROME_PATH=/path/to/chrome`.
+### Linting
 
-## Architecture notes
+Run ESLint across TypeScript and TSX files:
+```bash
+pnpm run lint
+```
 
-- **`src/services/storageStore.ts`** is the only writer of `localStorage`.
-  Snapshots keep object identity while the raw JSON is unchanged, so
-  `useSyncExternalStore` can compare them without re-rendering in a loop.
-  Mutations re-read before writing, so two updates in the same tick cannot
-  clobber each other, and failed writes surface through a `fitness_storage_error`
-  event instead of throwing.
-- **Sport styling lives in static records** (`src/utils/sportMaps.ts`). Tailwind
-  v4 cannot see an interpolated class name, so a new sport becomes a compile
-  error rather than an unstyled card.
-- **Elevation profiles are derived** from an activity's own coordinates, so a
-  route and its chart can never drift apart.
-- **Nothing touches the network.** Avatars are initials, icons are inline SVG and
-  GPS tracks are synthesized locally from a seeded PRNG.
+---
+
+## Automated Verification Harness
+
+The project includes an end-to-end headless Chrome verification suite in `scripts/verify.mjs`:
+
+```bash
+pnpm run verify
+```
+
+To run an isolated test suite:
+```bash
+pnpm run verify -- --suite=modules       # Telemetry math, PRNG routes, formatters, storage
+pnpm run verify -- --suite=ui            # Card rendering, SVG geometry, contrast, accessibility
+pnpm run verify -- --suite=responsive    # 360px - 1440px viewport layouts and touch target floors
+pnpm run verify -- --suite=interactions  # Kudos, comments, modal forms, filters, and reset flow
+```
+
+---
+
+## Project Structure
+
+```
+.
+├── public/
+│   └── favicon.svg
+├── scripts/
+│   └── verify.mjs                     # Headless Chrome test runner
+├── src/
+│   ├── components/
+│   │   ├── charts/                    # Route map and elevation SVG visualizers
+│   │   ├── feed/                      # Activity feed, cards, stats grid, social bars
+│   │   ├── forms/                     # Manual activity entry modal and validators
+│   │   ├── icons/                     # Inline SVG action and sport iconography
+│   │   ├── layout/                    # Header, AppShell, and mobile BottomNav
+│   │   ├── sidebar/                   # Profile card, weekly goal progress, challenges
+│   │   └── ui/                        # Button, Input, Select, Modal, ErrorBoundary
+│   ├── hooks/                         # useActivities, useSocial, useWeeklyStats, useChallenges
+│   ├── services/                      # storageStore (useSyncExternalStore client)
+│   ├── types/                         # Pure TypeScript domain models
+│   ├── utils/                         # Telemetry math, PRNG generator, formatters, sport maps
+│   ├── App.tsx
+│   ├── index.css                      # Tailwind v4 theme declarations
+│   └── main.tsx
+├── package.json
+├── tsconfig.app.json
+└── vite.config.ts
+```
+
+---
+
+## License
+
+MIT License. See LICENSE for details.
