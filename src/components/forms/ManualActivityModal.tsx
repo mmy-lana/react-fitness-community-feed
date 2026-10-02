@@ -95,11 +95,13 @@ function parseNumber(value: string): number | null {
 function validateForm(state: DraftState): FormErrors {
   const errors: FormErrors = {};
 
-  const titleLength = state.title.trim().length;
+  const cleanTitle = stripInvisibleCharacters(state.title);
+  const titleLength = cleanTitle.length;
   if (titleLength < 3) errors.title = 'Give the activity a title of at least 3 characters.';
   else if (titleLength > TITLE_MAX) errors.title = `Keep the title under ${TITLE_MAX} characters.`;
 
-  if (state.description.length > DESCRIPTION_MAX) {
+  const cleanDescription = stripInvisibleCharacters(state.description);
+  if (cleanDescription.length > DESCRIPTION_MAX) {
     errors.description = `Keep the description under ${DESCRIPTION_MAX} characters.`;
   }
 
